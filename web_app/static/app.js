@@ -1,0 +1,15 @@
+const input = document.querySelector('#video-input'), button = document.querySelector('#analyse');
+const drop = document.querySelector('#drop-zone'), upload = document.querySelector('#upload-view');
+const progress = document.querySelector('#progress-view'), results = document.querySelector('#results-view');
+const status = document.querySelector('#status');
+let selected;
+function setFile(file) { if (!file) return; if (!/\.(mp4|mov)$/i.test(file.name)) return alert('Please choose an MP4 or MOV video.'); selected = file; drop.classList.add('ready'); drop.querySelector('strong').textContent = file.name; drop.querySelector('small').textContent = `${(file.size / 1048576).toFixed(1)} MB · ready to analyze`; button.disabled = false; }
+input.addEventListener('change', () => setFile(input.files[0]));
+['dragenter','dragover'].forEach(event => drop.addEventListener(event, e => { e.preventDefault(); drop.classList.add('drag'); }));
+['dragleave','drop'].forEach(event => drop.addEventListener(event, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+drop.addEventListener('drop', e => setFile(e.dataTransfer.files[0]));
+button.addEventListener('click', async () => { const form = new FormData(); form.append('video', selected); button.disabled = true; upload.classList.add('hidden'); progress.classList.remove('hidden'); try { const started = await fetch('/api/analyse', { method: 'POST', body: form }); const { job_id, detail } = await started.json(); if (!started.ok) throw new Error(detail || 'Upload failed.'); poll(job_id); } catch (err) { fail(err.message); } });
+async function poll(id) { try { const response = await fetch(`/api/jobs/${id}`), job = await response.json(); status.textContent = job.message; if (job.status === 'complete') return showResult(job); if (job.status === 'error') return fail(job.message); setTimeout(() => poll(id), 1400); } catch { setTimeout(() => poll(id), 2000); } }
+function showResult(job) { progress.classList.add('hidden'); results.classList.remove('hidden'); document.querySelector('#result-video').src = job.video; const r = job.result; document.querySelector('#feedback').textContent = r.feedback; document.querySelector('#feedback-source').textContent = r.generated_feedback ? 'Personalized AI coaching based on your analyzed stroke.' : 'Local coaching fallback — add OPENAI_API_KEY for AI-generated feedback.'; const labels = [['Strokes analyzed', r.strokes], ['Peak knee deviation', `${r.metrics.peak_knee_deviation}° at ${r.metrics.peak_knee_at}%`], ['Peak body deviation', `${r.metrics.peak_body_deviation}° at ${r.metrics.peak_body_at}%`], ['Body-angle RMSE', `${r.metrics.body_rmse}°`]]; document.querySelector('#metric-list').innerHTML = labels.map(([a,b]) => `<div><span>${a}</span><strong>${b}</strong></div>`).join(''); window.scrollTo({top:0, behavior:'smooth'}); }
+function fail(message) { progress.classList.add('hidden'); upload.classList.remove('hidden'); button.disabled = false; alert(message); }
+document.querySelector('#again').addEventListener('click', () => location.reload());

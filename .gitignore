@@ -1,8 +1,7 @@
 .venv/
 __pycache__/
 .idea/
-.DS_Store
-.venv/
-__pycache__/
-.idea/
+Videos/
+automation_test/
+test_dir/
 .DS_Store

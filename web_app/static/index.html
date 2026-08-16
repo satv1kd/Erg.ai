@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Erg.ai Studio</title><link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <nav><a class="brand" href="/"><span>◒</span> ERG.AI</a><div class="nav-note">STUDIO <i></i> BIOMECHANICS</div></nav>
+    <section class="hero" id="upload-view">
+      <p class="eyebrow">ROW SMARTER</p><h1>See every stroke.<br><em>Own the next one.</em></h1>
+      <p class="lede">Upload a side-view erg video. We’ll render your motion, analyze ten strokes, and turn the data into a focused coaching cue.</p>
+      <label class="drop-zone" id="drop-zone" for="video-input">
+        <input id="video-input" type="file" accept="video/mp4,video/quicktime,.mp4,.mov">
+        <span class="upload-icon">↑</span><strong>Drop in your rowing video</strong><small>MP4 or MOV · side view works best · 10+ strokes</small>
+      </label>
+      <button id="analyse" disabled>Analyze my stroke <span>→</span></button><p class="privacy">Your upload is used only to create this analysis.</p>
+    </section>
+    <section class="progress hidden" id="progress-view"><div class="spinner"></div><p class="eyebrow">ANALYSIS IN MOTION</p><h2>Building your stroke profile</h2><p id="status">Video uploaded. Preparing analysis…</p><div class="track"><span></span></div><small>We’ll show your annotated video and coaching feedback once ten strokes are complete.</small></section>
+    <section class="results hidden" id="results-view">
+      <p class="eyebrow">YOUR SESSION</p><h2>Stroke visualization</h2><video id="result-video" controls playsinline></video>
+      <div class="result-grid"><article class="feedback"><p class="label">COACHING FOCUS</p><h3 id="feedback"></h3><p id="feedback-source"></p></article><article class="metrics"><p class="label">REFERENCE COMPARISON</p><div id="metric-list"></div></article></div>
+      <button class="secondary" id="again">Analyze another video <span>↗</span></button>
+    </section>
+  </main><script src="/static/app.js"></script>
+</body></html>

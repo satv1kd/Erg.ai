@@ -5,12 +5,6 @@ import json
 import os
 from toolbox import process_poses, stack_poses, compare_ref, absolute_to_relative
 
-path = 'IMG_8946.MOV'
-cap = cv2.VideoCapture(path)
-fps = cap.get(cv2.CAP_PROP_FPS)
-mpPose = mp.solutions.pose
-mpDraw = mp.solutions.drawing_utils
-pose = mpPose.Pose(min_detection_confidence=0.85,min_tracking_confidence=0.85)
 right_pose_list = [12,14,16,18,24,26,28]
 right_connections = [(12,14),(14,16),(16,18),(12,24),(24,26),(26,28)]
 left_pose_list = [11,13,15,17,23,25,27]
@@ -160,186 +154,190 @@ def determine_right(results,sensitivity=0.75):
     else:
         return 1
 
-with open('ten_strokes.json', 'r') as file:
-    strokes = json.load(file)
-ref_stroke = strokes[0][1]
+if __name__ == '__main__':
+    path = 'Videos/satvik_erg.mp4'
+    cap = cv2.VideoCapture(path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    mpPose = mp.solutions.pose
+    mpDraw = mp.solutions.drawing_utils
+    pose = mpPose.Pose(min_detection_confidence=0.85,min_tracking_confidence=0.85)
+    with open('ten_strokes.json', 'r') as file:
+        strokes = json.load(file)
+    ref_stroke = strokes[0][1]
 
-alphas = [0.2+i*0.025 for i in range(0,11)] # 10 strokes in test video
-glitches = dict()
-max_knee_glitch = -1
-max_body_glitch = -1
-prev_knee_angle = 0
-knee_angle = 0
-prev_body_angle = 0
-body_angle = 0
-a_idx = 0
-ended_stroke = False
-valid_detection = False
-FLIP_CODE = 0
-shoulder = 12
-init_frame = 0
-while True:
-    curr_alpha = 0.275 # alphas[a_idx]
+    alphas = [0.2+i*0.025 for i in range(0,11)] # 10 strokes in test video
+    glitches = dict()
+    max_knee_glitch = -1
+    max_body_glitch = -1
+    prev_knee_angle = 0
+    knee_angle = 0
+    prev_body_angle = 0
+    body_angle = 0
+    a_idx = 0
     ended_stroke = False
-    success, img = cap.read()
-    if not success:
-        break
-    if path.lower().endswith(".mov") and not valid_detection:
-        valid_detection = True
-        img = cv2.rotate(img, cv2.ROTATE_180)
-        continue
-    # img = cv2.flip(img, 1)
-    if FLIP_CODE:
-        img = cv2.flip(img,FLIP_CODE)
-        continue
-    img = cv2.resize(img, (1700,1000))
-    imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = pose.process(imgRGB)
-    if results.pose_landmarks:
-        min_shoulder_pos = min(results.pose_landmarks.landmark[shoulder].x,min_shoulder_pos)
-        max_shoulder_pos = max(results.pose_landmarks.landmark[shoulder].x,max_shoulder_pos)
-        # Add check here (stall with continues)
-        if not valid_detection and determine_right(results) == -1:
-            continue
-        elif determine_right(results) == 0 and not valid_detection:
-            FLIP_CODE = 1
+    valid_detection = False
+    FLIP_CODE = 0
+    shoulder = 12
+    init_frame = 0
+    while True:
+        curr_alpha = 0.275 # alphas[a_idx]
+        ended_stroke = False
+        success, img = cap.read()
+        if not success:
+            break
+        if path.lower().endswith(".mov") and not valid_detection:
             valid_detection = True
+            img = cv2.rotate(img, cv2.ROTATE_180)
             continue
-        else:
-            valid_detection = True
-       # mpDraw.draw_landmarks(img, results.pose_landmarks,mpPose.POSE_CONNECTIONS)
-        h,w,c = img.shape
-        for id, lm in enumerate(results.pose_landmarks.landmark):
-            cx,cy = int(lm.x*w),int(lm.y*h)
-            if id in prev_positions_ema:
-                px,py = prev_positions_ema[id]
-                cx,cy = exponential_moving_average(cx,cy,px,py,curr_alpha)
-            line_positions_dict.update({id: (cx,cy)})
-            if id in right_pose_list:
-                # print(id, lm.visibility)
-                cv2.circle(img, (cx,cy), 10, (255,0,0),cv2.FILLED)
-                if not finish:
-                    if id not in pos_locations_dict.keys():
-                        pos_locations_dict.update({id: [(cx,cy)]})
-                    else:
+        # img = cv2.flip(img, 1)
+        if FLIP_CODE:
+            img = cv2.flip(img,FLIP_CODE)
+            continue
+        img = cv2.resize(img, (1700,1000))
+        imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = pose.process(imgRGB)
+        if results.pose_landmarks:
+            min_shoulder_pos = min(results.pose_landmarks.landmark[shoulder].x,min_shoulder_pos)
+            max_shoulder_pos = max(results.pose_landmarks.landmark[shoulder].x,max_shoulder_pos)
+            # Add check here (stall with continues)
+            if not valid_detection and determine_right(results) == -1:
+                continue
+            elif determine_right(results) == 0 and not valid_detection:
+                FLIP_CODE = 1
+                valid_detection = True
+                continue
+            else:
+                valid_detection = True
+           # mpDraw.draw_landmarks(img, results.pose_landmarks,mpPose.POSE_CONNECTIONS)
+            h,w,c = img.shape
+            for id, lm in enumerate(results.pose_landmarks.landmark):
+                cx,cy = int(lm.x*w),int(lm.y*h)
+                if id in prev_positions_ema:
+                    px,py = prev_positions_ema[id]
+                    cx,cy = exponential_moving_average(cx,cy,px,py,curr_alpha)
+                line_positions_dict.update({id: (cx,cy)})
+                if id in right_pose_list:
+                    # print(id, lm.visibility)
+                    cv2.circle(img, (cx,cy), 10, (255,0,0),cv2.FILLED)
+                    if not finish:
+                        if id not in pos_locations_dict.keys():
+                            pos_locations_dict.update({id: [(cx,cy)]})
+                        else:
+                            pos_locations_dict[id].append((cx,cy))
+                            if id == 12 and len(pos_locations_dict[shoulder]) >= 7:
+                                # adjust this based on glitches
+                                if pos_locations_dict[shoulder][-1][0] > pos_locations_dict[shoulder][-7][0]:
+                                    finish_frame = frame_idx
+                                    finish = True
+                            elif id == 11 and len(pos_locations_dict[shoulder]) >= 7:
+                                if pos_locations_dict[shoulder][-1][0] < pos_locations_dict[shoulder][-7][0]:
+                                    finish_frame = frame_idx
+                                    finish = True
+                    elif finish and not catch:
                         pos_locations_dict[id].append((cx,cy))
-                        if id == 12 and len(pos_locations_dict[shoulder]) >= 7:
-                            # adjust this based on glitches
-                            if pos_locations_dict[shoulder][-1][0] > pos_locations_dict[shoulder][-7][0]:
-                                finish_frame = frame_idx
-                                finish = True
-                        elif id == 11 and len(pos_locations_dict[shoulder]) >= 7:
-                            if pos_locations_dict[shoulder][-1][0] < pos_locations_dict[shoulder][-7][0]:
-                                finish_frame = frame_idx
-                                finish = True
-                elif finish and not catch:
-                    pos_locations_dict[id].append((cx,cy))
-                    if waited < 10 and id == shoulder:
-                        waited += 1
-                    else:
-                        if id == 12:
-                            # adjust this based on glitches
-                            if pos_locations_dict[shoulder][-1][0] < pos_locations_dict[shoulder][-7][0]:
-                                catch_frame = frame_idx
-                                catch = True
-                        elif id == 11:
-                            if pos_locations_dict[shoulder][-1][0] > pos_locations_dict[shoulder][-7][0]:
-                                catch_frame = frame_idx
-                                catch = True
-            prev_positions_ema[id] = (cx,cy)
-        for i,f in right_connections:
-            i_cx,i_cy = line_positions_dict[i]
-            f_cx,f_cy = line_positions_dict[f]
-            cv2.line(img,(i_cx,i_cy),(f_cx,f_cy),(0,255,0),5)
-    else:
-        continue
-    if catch and finish: # End of stroke
-        stroke_rate = round(60*fps/((catch_frame-finish_frame) + (finish_frame-init_frame)),3)
-        stroke_count += 1
-        init_frame = frame_idx
-        ended_stroke = True
-        catch = False
-        finish = False
-        waited = 0
-        # print(f"Distance traveled by shoulder: {round(max_shoulder_pos-min_shoulder_pos,3)*100} % of width")
-        max_shoulder_pos = -1
-        min_shoulder_pos = 10e99
-
-        poses_x, poses_y = process_poses(pos_locations_dict)
-        user_list = stack_poses(poses_x,poses_y)
-        user_list = absolute_to_relative(user_list,h,w)
-        if stroke_count > 1:
-            compare_ref(user_list,ref_stroke)
-        j_data = None
-        j_path = 'user_strokes.json'
-        if os.path.getsize(j_path) > 0:
-            with open(j_path, 'r') as inputs:
-                j_data = json.load(inputs)
+                        if waited < 10 and id == shoulder: # Heuristic buffer to prevent ending stroke early
+                            waited += 1
+                        else:
+                            if id == 12:
+                                # adjust this based on glitches
+                                if pos_locations_dict[shoulder][-1][0] < pos_locations_dict[shoulder][-7][0]:
+                                    catch_frame = frame_idx
+                                    catch = True
+                            elif id == 11:
+                                if pos_locations_dict[shoulder][-1][0] > pos_locations_dict[shoulder][-7][0]:
+                                    catch_frame = frame_idx
+                                    catch = True
+                prev_positions_ema[id] = (cx,cy)
+            for i,f in right_connections:
+                i_cx,i_cy = line_positions_dict[i]
+                f_cx,f_cy = line_positions_dict[f]
+                cv2.line(img,(i_cx,i_cy),(f_cx,f_cy),(0,255,0),5)
         else:
-            with open(j_path, 'w') as output:
-                json.dump([], output)
-                j_data = []
-        j_data.append(user_list)
-        with open('user_strokes.json', 'w') as output:
-            json.dump(j_data, output, indent=2)
-        # TODO: Add comparison function here
+            continue
+        if catch and finish: # End of stroke
+            stroke_rate = round(60*fps/((catch_frame-finish_frame) + (finish_frame-init_frame)),3)
+            stroke_count += 1
+            init_frame = frame_idx
+            ended_stroke = True
+            catch = False
+            finish = False
+            waited = 0
+            # print(f"Distance traveled by shoulder: {round(max_shoulder_pos-min_shoulder_pos,3)*100} % of width")
+            max_shoulder_pos = -1
+            min_shoulder_pos = 10e99
+            # print(len(pos_locations_dict[list(pos_locations_dict.keys())[0]]))
+            # if stroke_count > 1:
+                # compare_ref(user_list,ref_stroke)
+            j_data = None
+            j_path = 'user_strokes.json'
+            if os.path.getsize(j_path) > 0:
+                with open(j_path, 'r') as inputs:
+                    j_data = json.load(inputs)
+            else:
+                with open(j_path, 'w') as output:
+                    json.dump([], output)
+                    j_data = []
+            j_data.append(pos_locations_dict)
+            with open('user_strokes.json', 'w') as output:
+                json.dump(j_data, output, indent=2)
+            # TODO: Add comparison function here
 
-        
-        pos_locations_dict = {}
-        
-        # TODO: Normalize stroke and compute similarity with avg youtube stroke
-        # TODO: Compute knee and body angles on normalized stroke data
-    
-    
-    if stroke_count:
-        cv2.putText(img, f"Stroke rate: {stroke_rate}", (1200, 50), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
-        cv2.putText(img, f"Stroke count: {stroke_count}", (1200, 100), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
-    h,w,c = img.shape
 
-    VERT_SCALE = 1.2
-    # ------------------Angle Calculations------------------
-    hip = (line_positions_dict[24][0],line_positions_dict[24][1])
-    knee = (line_positions_dict[26][0],line_positions_dict[26][1])
-    ankle = (line_positions_dict[28][0],line_positions_dict[28][1])
-    shoulder_pos = (line_positions_dict[12][0],line_positions_dict[12][1])
-    if not first_frame:
-        first_frame = True
-        initial_height = round(line_positions_dict[24][1] + VERT_SCALE*(line_positions_dict[12][1]-line_positions_dict[24][1]))
-    ghost_body_pos = (line_positions_dict[24][0],initial_height)
-    a,b,c = get_knee_lengths(hip=hip,knee=knee,ankle=ankle)
-    d,e = get_body_lengths(hip=hip,shoulder=shoulder_pos)
-    knee_angle = round(find_angle(a,b,c)*(180/math.pi),1)
-    if shoulder_pos[0] > hip[0]:
-        body_direction = 1
-    elif shoulder_pos[0] == hip[0]:
-        body_direction = 0
-    else:
-        body_direction = -1
-    body_angle = round((180-round(math.acos(e / d) * (180 / math.pi), 3)),1)*body_direction
-    # ------------------Angular Velocity Calculations------------------
-    t = 1/fps
-    body_angle_v = (body_angle-prev_body_angle)/t
-    knee_angle_v = (knee_angle-prev_knee_angle)/t
-    cv2.putText(img, f"Body angle velocity: {round(body_angle_v)}", (70, 50), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
-    cv2.putText(img, f"Knee angle velocity: {round(knee_angle_v)}", (70, 100), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
-    # ------------------GRAPHING------------------
-    draw_pose_graph(img, hip, knee, ankle, shoulder_pos, ghost_body_pos, knee_angle, body_angle)
-    max_knee_glitch = max(max_knee_glitch, knee_angle - prev_knee_angle)
-    max_body_glitch = max(max_body_glitch, body_angle - prev_body_angle)
-    if ended_stroke and stroke_count > 1: # Cycle through alphas here
-        # a_idx += 1
-        glitches[curr_alpha] = (round(max_knee_glitch,2),round(max_body_glitch,2))
-        max_knee_glitch = 0
-        max_body_glitch = 0
-        # print(f"(knee,body) glitch at a={round(curr_alpha,3)}: {glitches[curr_alpha]}")
-    # cv2.putText(img, f"Knee angle: {knee_angle}", (70, 50), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
-    # cv2.putText(img, f"Body angle: {body_angle}", (70, 100), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
-    if a_idx > 0:
-        cv2.putText(img, f"Stroke variance: {glitches[alphas[a_idx - 1]]}", (70, 150), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
-        cv2.putText(img, f"Stroke alpha: {round(alphas[a_idx - 1],3)}", (70, 200), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
-    cv2.imshow("Image", img)
-    cv2.waitKey(1)
-    frame_idx += 1
-    prev_knee_angle = knee_angle
-    prev_body_angle = body_angle
-    # 0.086 seconds per frame for left side, 0.068 for right side
+            pos_locations_dict = {}
+
+            # TODO: Normalize stroke and compute similarity with avg youtube stroke
+            # TODO: Compute knee and body angles on normalized stroke data
+
+
+        if stroke_count:
+            cv2.putText(img, f"Stroke rate: {stroke_rate}", (1200, 50), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
+            cv2.putText(img, f"Stroke count: {stroke_count}", (1200, 100), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
+        h,w,c = img.shape
+
+        VERT_SCALE = 1.2
+        # ------------------Angle Calculations------------------
+        hip = (line_positions_dict[24][0],line_positions_dict[24][1])
+        knee = (line_positions_dict[26][0],line_positions_dict[26][1])
+        ankle = (line_positions_dict[28][0],line_positions_dict[28][1])
+        shoulder_pos = (line_positions_dict[12][0],line_positions_dict[12][1])
+        if not first_frame:
+            first_frame = True
+            initial_height = round(line_positions_dict[24][1] + VERT_SCALE*(line_positions_dict[12][1]-line_positions_dict[24][1]))
+        ghost_body_pos = (line_positions_dict[24][0],initial_height)
+        a,b,c = get_knee_lengths(hip=hip,knee=knee,ankle=ankle)
+        d,e = get_body_lengths(hip=hip,shoulder=shoulder_pos)
+        knee_angle = round(find_angle(a,b,c)*(180/math.pi),1)
+        if shoulder_pos[0] > hip[0]:
+            body_direction = 1
+        elif shoulder_pos[0] == hip[0]:
+            body_direction = 0
+        else:
+            body_direction = -1
+        body_angle = round((180-round(math.acos(e / d) * (180 / math.pi), 3)),1)*body_direction #TODO: append angles first??
+        # ------------------Angular Velocity Calculations------------------
+        t = 1/fps
+        body_angle_v = (body_angle-prev_body_angle)/t
+        knee_angle_v = (knee_angle-prev_knee_angle)/t
+        cv2.putText(img, f"Body angle velocity: {round(body_angle_v)}", (70, 50), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
+        cv2.putText(img, f"Knee angle velocity: {round(knee_angle_v)}", (70, 100), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
+        # ------------------GRAPHING------------------
+        draw_pose_graph(img, hip, knee, ankle, shoulder_pos, ghost_body_pos, knee_angle, body_angle)
+        max_knee_glitch = max(max_knee_glitch, knee_angle - prev_knee_angle)
+        max_body_glitch = max(max_body_glitch, body_angle - prev_body_angle)
+        if ended_stroke and stroke_count > 1: # Cycle through alphas here
+            # a_idx += 1
+            glitches[curr_alpha] = (round(max_knee_glitch,2),round(max_body_glitch,2))
+            max_knee_glitch = 0
+            max_body_glitch = 0
+            # print(f"(knee,body) glitch at a={round(curr_alpha,3)}: {glitches[curr_alpha]}")
+        # cv2.putText(img, f"Knee angle: {knee_angle}", (70, 50), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
+        # cv2.putText(img, f"Body angle: {body_angle}", (70, 100), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
+        if a_idx > 0:
+            cv2.putText(img, f"Stroke variance: {glitches[alphas[a_idx - 1]]}", (70, 150), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
+            cv2.putText(img, f"Stroke alpha: {round(alphas[a_idx - 1],3)}", (70, 200), cv2.FONT_HERSHEY_PLAIN, 3, (255, 0, 0), 3)
+        cv2.imshow("Image", img)
+        cv2.waitKey(1)
+        frame_idx += 1
+        prev_knee_angle = knee_angle
+        prev_body_angle = body_angle
+        # 0.086 seconds per frame for left side, 0.068 for right side

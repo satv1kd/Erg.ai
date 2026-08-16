@@ -1,0 +1,28 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono&family=Manrope:wght@400;500;600;700;800&family=Playfair+Display:ital,wght@0,600;0,700;1,600&display=swap');
+:root { --ink:#081523; --mint:#74ecad; --ice:#b9dfff; --muted:#9eacb7; }
+* { box-sizing:border-box; }
+body { margin:0; background:radial-gradient(circle at 83% 9%,#16405b 0,transparent 28%),var(--ink); color:#f7fbff; font-family:Manrope,Arial,sans-serif; }
+.shell { width:min(1120px,calc(100% - 48px)); margin:auto; min-height:100vh; }
+nav { height:98px; display:flex; align-items:center; justify-content:space-between; }
+.brand { color:#fff; text-decoration:none; letter-spacing:.18em; font-weight:800; font-size:1.1rem; }
+.brand span { color:var(--mint); font-size:1.7rem; vertical-align:-2px; margin-right:5px; }
+.nav-note,.eyebrow,.label { font:11px 'DM Mono',monospace; letter-spacing:.16em; color:var(--ice); }
+.nav-note i { display:inline-block; width:6px; height:6px; background:var(--mint); border-radius:50%; margin:0 9px 1px; }
+.hero { padding:76px 0 100px; max-width:720px; }
+.eyebrow { margin:0 0 18px; color:var(--mint); }
+h1,h2 { font-size:clamp(3rem,7vw,5.8rem); letter-spacing:-.06em; line-height:.96; margin:0; font-weight:800; }
+h1 em { font-family:'Playfair Display',serif; font-weight:600; color:var(--ice); }
+.lede { font-size:1.08rem; line-height:1.7; color:#c3ced7; max-width:610px; margin:30px 0 37px; }
+.drop-zone { border:1px dashed #49708b; background:#0c2031; border-radius:16px; min-height:174px; display:flex; flex-direction:column; align-items:center; justify-content:center; cursor:pointer; transition:.2s; gap:8px; }
+.drop-zone:hover,.drop-zone.drag,.drop-zone.ready { border-color:var(--mint); background:#112b3d; }
+.drop-zone input { display:none; }.upload-icon { font-size:1.8rem; color:var(--mint); line-height:1; }.drop-zone strong { font-size:1.05rem; }
+.drop-zone small,.privacy,.progress small { color:var(--muted); font-size:.78rem; }
+button { margin-top:20px; background:var(--mint); border:0; padding:16px 22px; border-radius:8px; color:#052013; font-size:.9rem; font-weight:800; cursor:pointer; transition:.2s; }
+button:hover { transform:translateY(-2px); background:#9af6c5; } button:disabled { opacity:.4; cursor:not-allowed; transform:none; }.privacy { margin:13px 0; }.hidden { display:none; }
+.progress { padding:145px 0; text-align:center; max-width:500px; margin:auto; }.progress h2,.results h2 { font-size:clamp(2.4rem,5vw,4.5rem); margin-bottom:19px; }.progress>p:not(.eyebrow) { color:#c3ced7; }
+.spinner { width:42px; height:42px; border:3px solid #284963; border-top-color:var(--mint); border-radius:50%; animation:spin .8s linear infinite; margin:0 auto 28px; }
+@keyframes spin { to { transform:rotate(360deg); } }.track { height:4px; background:#20384b; border-radius:10px; overflow:hidden; margin:28px auto 14px; }.track span { display:block; width:43%; height:100%; background:var(--mint); animation:slide 1.5s ease-in-out infinite; } @keyframes slide { 50% { transform:translateX(135%); } }
+.results { padding:52px 0 80px; }.results video { width:100%; max-height:640px; background:#02070a; border-radius:16px; margin:20px 0 26px; }.result-grid { display:grid; grid-template-columns:1.35fr 1fr; gap:18px; }
+.feedback,.metrics { border-radius:15px; padding:28px; background:#0d2234; }.feedback { background:linear-gradient(130deg,#183c48,#0d2b37); }.label { color:var(--mint); margin:0 0 16px; }.feedback h3 { font:600 1.25rem/1.6 'Playfair Display',serif; margin:0; }.feedback p:last-child { font-size:.78rem; color:#b6cbd7; margin:20px 0 0; }
+.metrics div { border-top:1px solid #284459; padding:13px 0; display:flex; justify-content:space-between; gap:15px; font-size:.82rem; }.metrics span { color:#a9bac5; }.metrics strong { font-family:'DM Mono'; font-size:.74rem; }.secondary { background:transparent; border:1px solid #53718a; color:#eaf5ff; }
+@media(max-width:680px) { .shell { width:min(100% - 30px,1120px); } nav { height:72px; }.nav-note { font-size:9px; }.hero { padding:54px 0; }.result-grid { grid-template-columns:1fr; }.results { padding-top:25px; } }
