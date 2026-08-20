@@ -1,4 +1,5 @@
 import mediapipe as mp
+import numpy as np
 import cv2
 import math
 import json
@@ -154,9 +155,11 @@ def determine_right(results,sensitivity=0.75):
     else:
         return 1
 
+#TODO: Refactor!!
+
 if __name__ == '__main__':
     path = 'Videos/satvik_erg.mp4'
-    cap = cv2.VideoCapture(path)
+    cap = cv2.VideoCapture(0)
     fps = cap.get(cv2.CAP_PROP_FPS)
     mpPose = mp.solutions.pose
     mpDraw = mp.solutions.drawing_utils
@@ -179,13 +182,15 @@ if __name__ == '__main__':
     FLIP_CODE = 0
     shoulder = 12
     init_frame = 0
+    filler = np.ones((1024,1024,3), np.uint8) * 255
+    error_message = False
     while True:
         curr_alpha = 0.275 # alphas[a_idx]
         ended_stroke = False
         success, img = cap.read()
         if not success:
             break
-        if path.lower().endswith(".mov") and not valid_detection:
+        if path.lower().endswith(".mov") and not valid_detection: # check this
             valid_detection = True
             img = cv2.rotate(img, cv2.ROTATE_180)
             continue
@@ -201,13 +206,22 @@ if __name__ == '__main__':
             max_shoulder_pos = max(results.pose_landmarks.landmark[shoulder].x,max_shoulder_pos)
             # Add check here (stall with continues)
             if not valid_detection and determine_right(results) == -1:
+                erorr_message = True
+                cv2.putText(filler, "Please move back so your body is visible", (200,512), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2)
+                cv2.imshow("placeholder", filler)
+                cv2.waitKey(1)
                 continue
             elif determine_right(results) == 0 and not valid_detection:
+                print("ready to rumble!!")
                 FLIP_CODE = 1
                 valid_detection = True
                 continue
             else:
+                print("ready to rumble!!")
                 valid_detection = True
+            if error_message:
+                print("attempted destruction")
+                cv2.destroyWindow("placeholder")
            # mpDraw.draw_landmarks(img, results.pose_landmarks,mpPose.POSE_CONNECTIONS)
             h,w,c = img.shape
             for id, lm in enumerate(results.pose_landmarks.landmark):
@@ -260,6 +274,7 @@ if __name__ == '__main__':
             init_frame = frame_idx
             ended_stroke = True
             catch = False
+
             finish = False
             waited = 0
             # print(f"Distance traveled by shoulder: {round(max_shoulder_pos-min_shoulder_pos,3)*100} % of width")
@@ -269,7 +284,7 @@ if __name__ == '__main__':
             # if stroke_count > 1:
                 # compare_ref(user_list,ref_stroke)
             j_data = None
-            j_path = 'user_strokes.json'
+            j_path = 'user_strokes.json' #TODO: make this more robust (so it doesn't crash if poses are missing)
             if os.path.getsize(j_path) > 0:
                 with open(j_path, 'r') as inputs:
                     j_data = json.load(inputs)
