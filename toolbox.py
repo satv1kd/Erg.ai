@@ -1,5 +1,6 @@
 import math
 import json
+import re
 from dataclasses import dataclass
 import numpy as np
 import os
@@ -357,13 +358,19 @@ def local_feedback(comparison):
     return cue
 
 
+def strip_asterisks(text):
+    # LLM replies use markdown **bold** / * bullets; drop them so cues read and speak cleanly
+    text = re.sub(r"^\s*\*\s+", "", text, flags=re.MULTILINE)
+    return re.sub(r"\*+", "", text)
+
+
 def coaching_feedback(comparison, use_llm=True):
     # Returns (text, generated_by_llm); never raises so a live session can't crash on it
     if use_llm and os.environ.get("OPENAI_API_KEY"):
         try:
             text = gpt_wrapper(*comparison)
             if text:
-                return text.strip(), True
+                return strip_asterisks(text).strip(), True
         except Exception as exc:
             print(f"LLM feedback failed, using local fallback: {exc}")
     return local_feedback(comparison), False
