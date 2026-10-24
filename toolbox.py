@@ -1,5 +1,6 @@
 import math
 import json
+from dataclasses import dataclass
 import numpy as np
 import os
 import matplotlib.pyplot as plt
@@ -25,9 +26,9 @@ def get_body_lengths(hip,shoulder):
     return a,b
 
 def find_angle(a,b,c):
-    # finds angle using law of cosines
+    # finds angle using law of cosines (clamped so float error on straight legs can't raise)
     right_side = (a**2 - b**2 + c**2)/(2*a*c)
-    return math.acos(right_side)
+    return math.acos(max(-1.0, min(1.0, right_side)))
 
 
 def calc_angles(hip,knee,ankle,shoulder):
@@ -40,7 +41,7 @@ def calc_angles(hip,knee,ankle,shoulder):
         body_direction = 0
     else:
         body_direction = -1
-    body_angle = round((180-round(math.acos(e / d) * (180 / math.pi), 3)),1)*body_direction
+    body_angle = round((180-round(math.acos(max(-1.0, min(1.0, e / d))) * (180 / math.pi), 3)),1)*body_direction
     return knee_angle,body_angle
 
 # [12,14,16,18,24,26,28]
@@ -204,7 +205,6 @@ def gpt_wrapper(knee_user, body_user, knee_ref, body_ref, max_knee_d, max_knee_l
      """
 
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
     response = client.chat.completions.create(
         model="gpt-5.4-mini",
         messages=[
@@ -215,6 +215,158 @@ def gpt_wrapper(knee_user, body_user, knee_ref, body_ref, max_knee_d, max_knee_l
     feedback = response.choices[0].message.content
 
     return feedback
+
+# ------------------Real-time coaching helpers------------------
+
+@dataclass
+class Stroke:
+    poses: dict      # landmark id -> [(x, y), ...] for every frame of the stroke
+    duration: float  # seconds
+    rate: float      # strokes per minute
+    travel: float    # shoulder travel as a fraction of frame width
+
+
+class StrokeDetector:
+    """main.py's finish/catch state machine, packaged for frame-by-frame use.
+
+    Expects right-facing points keyed by right-side landmark ids (mirror left-side
+    input first), so only main.py's right-side (id 12) rules are needed.
+    """
+    LOOKBACK = 7         # frames compared to decide shoulder direction
+    SETTLE_FRAMES = 10   # heuristic buffer to prevent ending stroke early
+
+    def __init__(self, min_travel=0.25, min_frames=15, min_rate=10, max_rate=60, shoulder=12):
+        self.min_travel = min_travel  # stroke_counter.py heuristic
+        self.min_frames = min_frames
+        self.min_rate = min_rate
+        self.max_rate = max_rate
+        self.shoulder = shoulder
+        self.stroke_count = 0
+        self.last_rate = None
+        self.reset()
+
+    def reset(self):
+        # Drop the partial stroke; the next detected stroke starts mid-cycle so it's discarded
+        self.poses = {}
+        self.finish = False
+        self.catch = False
+        self.waited = 0
+        self.start_time = None
+        self.warmed_up = False
+
+    def update(self, points, timestamp, frame_width):
+        """Feed one frame of points; returns a Stroke when a valid one completes."""
+        if self.start_time is None:
+            self.start_time = timestamp
+        for id, pt in points.items():
+            self.poses.setdefault(id, []).append(pt)
+        history = self.poses[self.shoulder]
+        if len(history) < self.LOOKBACK:
+            return None
+        if not self.finish:
+            if history[-1][0] > history[-self.LOOKBACK][0]:
+                self.finish = True
+        elif not self.catch:
+            if self.waited < self.SETTLE_FRAMES:
+                self.waited += 1
+            elif history[-1][0] < history[-self.LOOKBACK][0]:
+                self.catch = True
+        if not (self.finish and self.catch):
+            return None
+
+        # End of stroke
+        poses, duration, warmed_up = self.poses, timestamp - self.start_time, self.warmed_up
+        self.reset()
+        self.start_time = timestamp
+        self.warmed_up = True
+        xs = [p[0] for p in poses[self.shoulder]]
+        travel = (max(xs) - min(xs)) / frame_width
+        rate = 60 / duration if duration > 0 else 0
+        if not warmed_up or travel < self.min_travel or len(xs) < self.min_frames:
+            return None
+        if not self.min_rate <= rate <= self.max_rate:
+            return None
+        self.stroke_count += 1
+        self.last_rate = rate
+        return Stroke(poses, duration, rate, travel)
+
+
+def stroke_angle_curves(stroke_poses):
+    # Knee and body angles at each 1% of the stroke
+    poses_x, poses_y = process_poses(stroke_poses)
+    stacked = stack_poses(poses_x, poses_y)
+    knee_angles, body_angles = [], []
+    for i in range(len(stacked['24'])):
+        knee_angle, body_angle = calc_angles(stacked['24'][i], stacked['26'][i], stacked['28'][i], stacked['12'][i])
+        knee_angles.append(knee_angle)
+        body_angles.append(body_angle)
+    return knee_angles, body_angles
+
+
+def average_angle_curves(strokes_poses):
+    # Element-wise mean of each stroke's curves; strokes with degenerate geometry are skipped
+    curves = []
+    for poses in strokes_poses:
+        try:
+            curves.append(stroke_angle_curves(poses))
+        except (ValueError, ZeroDivisionError, KeyError, IndexError):
+            continue
+    if not curves:
+        return None
+    knee = np.mean([c[0] for c in curves], axis=0)
+    body = np.mean([c[1] for c in curves], axis=0)
+    # lists, since gpt_wrapper uses list.index
+    return [round(float(v), 1) for v in knee], [round(float(v), 1) for v in body]
+
+
+def load_reference_curves(path='ten_strokes.json', batch_index=0, aspect=16/9):
+    # Reference coords are normalized 0-1, so scale x by the source aspect ratio
+    # before measuring angles (assumes 16:9 YouTube video)
+    with open(path, 'r') as file:
+        batches = [b for b in json.load(file) if b]
+    scaled = [{k: [(x * aspect, y) for x, y in pts] for k, pts in stroke.items()} for stroke in batches[batch_index]]
+    curves = average_angle_curves(scaled)
+    if curves is None:
+        raise ValueError(f"No usable right-side strokes in reference batch {batch_index} of {path}")
+    return curves
+
+
+def compare_angle_curves(knee_user, body_user, knee_ref, body_ref):
+    # Same output shape as compare_ref, for curves that are already computed
+    abs_knee_dist = [abs(u - r) for u, r in zip(knee_user, knee_ref)]
+    abs_body_dist = [abs(u - r) for u, r in zip(body_user, body_ref)]
+    max_knee_diff = max(abs_knee_dist)
+    max_body_diff = max(abs_body_dist)
+    return (knee_user, body_user, knee_ref, body_ref,
+            max_knee_diff, abs_knee_dist.index(max_knee_diff),
+            max_body_diff, abs_body_dist.index(max_body_diff))
+
+
+def local_feedback(comparison):
+    # Deterministic cue used when the LLM is unavailable
+    _, body_user, _, body_ref, max_knee_d, max_knee_l, max_body_d, max_body_l = comparison
+    if max_body_d >= max_knee_d:
+        cue = f"Watch your body angle around {max_body_l}% of the stroke, it's {round(max_body_d)} degrees off the reference."
+    else:
+        cue = f"Watch your knee angle around {max_knee_l}% of the stroke, it's {round(max_knee_d)} degrees off the reference."
+    user_finish = body_user.index(min(body_user)) + 1
+    ref_finish = body_ref.index(min(body_ref)) + 1
+    if abs(user_finish - ref_finish) >= 5:
+        timing = "early" if user_finish < ref_finish else "late"
+        cue += f" You're reaching the finish {timing}, at {user_finish}% instead of {ref_finish}%."
+    return cue
+
+
+def coaching_feedback(comparison, use_llm=True):
+    # Returns (text, generated_by_llm); never raises so a live session can't crash on it
+    if use_llm and os.environ.get("OPENAI_API_KEY"):
+        try:
+            text = gpt_wrapper(*comparison)
+            if text:
+                return text.strip(), True
+        except Exception as exc:
+            print(f"LLM feedback failed, using local fallback: {exc}")
+    return local_feedback(comparison), False
 
 if __name__ == '__main__':
 
@@ -239,7 +391,7 @@ if __name__ == '__main__':
     print(feedback)
     '''
     # plt.plot(body1)
-    plt.plot(body2)
+    plt.plot(body2)os.e
     plt.show()
     plt.plot(knee1)
     plt.plot(knee2)
