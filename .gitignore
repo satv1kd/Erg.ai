@@ -31,3 +31,4 @@ node_modules/
 # tasks.json
 # tasks/ 
 models/
+google-cloud-sdk/

@@ -27,7 +27,7 @@ from google.cloud import texttospeech
 
 import main as prototype  # pose helpers from the original prototype
 import pose_compat
-import toolbox  # also loads .env (OPENAI_API_KEY, CLOUD_TTS_API_KEY)
+import toolbox  # also loads .env (OPENAI_API_KEY)
 
 
 
@@ -49,12 +49,11 @@ _tts_client = None
 
 def synthesize(text: str, prompt: str = "Say the following naturally", out_path: str = "output.wav") -> str:
     # LINEAR16 is a WAV, which afplay/aplay/winsound can all play without extra deps
+    # Auth is Application Default Credentials (gcloud auth application-default login),
+    # billed to the ADC quota project; no API key
     global _tts_client
-    api_key = os.getenv("CLOUD_TTS_API_KEY")
-    if not api_key:
-        raise RuntimeError("CLOUD_TTS_API_KEY is not set")
     if _tts_client is None:
-        _tts_client = texttospeech.TextToSpeechClient(client_options={"api_key": api_key})
+        _tts_client = texttospeech.TextToSpeechClient()
 
     response = _tts_client.synthesize_speech(
         input=texttospeech.SynthesisInput(text=text, prompt=prompt),
