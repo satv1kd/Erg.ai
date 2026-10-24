@@ -29,9 +29,10 @@ The repo has two separate halves:
 There is no test suite, linter, or build step.
 
 ```bash
+pip install -r requirements.txt   # repo root; shared by web_app and the root scripts
+
 # Web app (from web_app/, so `from analysis import ...` resolves)
 cd web_app
-pip install -r requirements.txt
 uvicorn app:app --reload --port 8000
 
 # Prototype scripts (run from repo root; they use relative paths)
