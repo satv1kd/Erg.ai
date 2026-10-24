@@ -157,9 +157,9 @@ def determine_right(results,sensitivity=0.75):
 #TODO: Refactor!!
 
 if __name__ == '__main__':
-    path = 'Videos/satvik_erg.mp4'
-    cap = cv2.VideoCapture(0)
-    print("reading camera")
+    path = 'test_dir/satvik_erg.mp4'
+    cap = cv2.VideoCapture(path)
+    # print("reading camera")
     fps = cap.get(cv2.CAP_PROP_FPS)
     mpPose = pose_compat
     mpDraw = pose_compat
@@ -207,32 +207,26 @@ if __name__ == '__main__':
         if results.pose_landmarks:
             min_shoulder_pos = min(results.pose_landmarks.landmark[shoulder].x,min_shoulder_pos)
             max_shoulder_pos = max(results.pose_landmarks.landmark[shoulder].x,max_shoulder_pos)
-            print("running poses")
             # Add check here (stall with continues)
             if not valid_detection and determine_right(results) == -1:
                 error_message = True
                 cv2.putText(filler, "Please move back so your body is visible", (200,512), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,0), 2)
                 cv2.imshow("placeholder", filler)
                 cv2.waitKey(1)
-                print("stuck")
                 continue
             elif determine_right(results) == 0 and not valid_detection:
                 FLIP_CODE = 1
                 valid_detection = True
-                print("stuck again")
                 continue
             else:
                 valid_detection = True
             if error_message and has_not_destroyed:
-                print("tried to break")
                 cv2.destroyWindow("placeholder")
-                print("broken?")
                 has_not_destroyed = False
 
            # mpDraw.draw_landmarks(img, results.pose_landmarks,mpPose.POSE_CONNECTIONS)
             h,w,c = img.shape
             for id, lm in enumerate(results.pose_landmarks.landmark):
-                print("continuing")
                 cx,cy = int(lm.x*w),int(lm.y*h)
                 if id in prev_positions_ema:
                     px,py = prev_positions_ema[id]
