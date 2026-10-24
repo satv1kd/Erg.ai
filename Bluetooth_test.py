@@ -31,10 +31,8 @@ import toolbox  # also loads .env (OPENAI_API_KEY)
 
 
 
-MODEL = "gemini-2.5-flash-tts"  # or "gemini-2.5-pro-tts"; 3.1 is "gemini-3.1-flash-tts-preview"
-VOICE = "Kore"                  # Gemini-TTS prebuilt voice name
+VOICE = "en-US-Chirp3-HD-Kore"  # ~0.6s per cue vs ~3.2s for Gemini-TTS Kore, but no style prompt
 LANGUAGE = "en-US"
-COACH_PROMPT = "Say the following like an encouraging rowing coach calling a cue mid-piece"
 
 REFERENCE_PATH = "ten_strokes.json"
 FRAME_WIDTH = 1280        # frames are resized to this width (keeps overlay text sizes sane)
@@ -47,7 +45,7 @@ _tts_client = None
 
 # ------------------Voice------------------
 
-def synthesize(text: str, prompt: str = "Say the following naturally", out_path: str = "output.wav") -> str:
+def synthesize(text: str, out_path: str = "output.wav") -> str:
     # LINEAR16 is a WAV, which afplay/aplay/winsound can all play without extra deps
     # Auth is Application Default Credentials (gcloud auth application-default login),
     # billed to the ADC quota project; no API key
@@ -56,11 +54,10 @@ def synthesize(text: str, prompt: str = "Say the following naturally", out_path:
         _tts_client = texttospeech.TextToSpeechClient()
 
     response = _tts_client.synthesize_speech(
-        input=texttospeech.SynthesisInput(text=text, prompt=prompt),
+        input=texttospeech.SynthesisInput(text=text),
         voice=texttospeech.VoiceSelectionParams(
             language_code=LANGUAGE,
             name=VOICE,
-            model_name=MODEL,
         ),
         audio_config=texttospeech.AudioConfig(
             audio_encoding=texttospeech.AudioEncoding.LINEAR16,
@@ -86,11 +83,11 @@ def play_audio(path: str) -> bool:
     return True
 
 
-def speak(text: str, prompt: str = COACH_PROMPT) -> bool:
+def speak(text: str) -> bool:
     fd, path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     try:
-        synthesize(text, prompt, path)
+        synthesize(text, path)
         return play_audio(path)
     finally:
         os.remove(path)
@@ -295,7 +292,7 @@ def main():
     args = parser.parse_args()
 
     if args.say:
-        speak(args.say, "Say the following in a warm, friendly tone")
+        speak(args.say)
         return
     summary = run(
         source=args.video if args.video else args.camera,
