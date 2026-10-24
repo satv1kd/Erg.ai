@@ -1,10 +1,9 @@
-import mediapipe as mp
+import pose_compat
 import numpy as np
 import cv2
 import math
 import json
 import os
-from toolbox import process_poses, stack_poses, compare_ref, absolute_to_relative
 
 right_pose_list = [12,14,16,18,24,26,28]
 right_connections = [(12,14),(14,16),(16,18),(12,24),(24,26),(26,28)]
@@ -162,8 +161,8 @@ if __name__ == '__main__':
     cap = cv2.VideoCapture(0)
     print("reading camera")
     fps = cap.get(cv2.CAP_PROP_FPS)
-    mpPose = mp.solutions.pose
-    mpDraw = mp.solutions.drawing_utils
+    mpPose = pose_compat
+    mpDraw = pose_compat
     pose = mpPose.Pose(min_detection_confidence=0.85,min_tracking_confidence=0.85)
     with open('ten_strokes.json', 'r') as file:
         strokes = json.load(file)

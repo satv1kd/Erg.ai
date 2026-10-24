@@ -1,10 +1,10 @@
 import numpy as np
 import cv2 as cv
-import mediapipe as mp
+import pose_compat
 
 cap = cv.VideoCapture(0)
-mpPose = mp.solutions.pose
-mpDraw = mp.solutions.drawing_utils
+mpPose = pose_compat
+mpDraw = pose_compat
 pose = mpPose.Pose(min_detection_confidence=0.85,min_tracking_confidence=0.85)
 if not cap.isOpened():
     print("Cannot open camera")

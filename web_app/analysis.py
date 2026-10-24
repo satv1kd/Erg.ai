@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import tempfile
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,19 @@ import numpy as np
 
 LANDMARKS = (12, 14, 16, 18, 24, 26, 28)
 CONNECTIONS = ((12, 14), (14, 16), (16, 18), (12, 24), (24, 26), (26, 28))
+POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
+POSE_MODEL_PATH = Path(__file__).resolve().parent / "models" / "pose_landmarker_full.task"
+
+
+def _pose_model() -> Path:
+    # The MediaPipe Tasks API needs a .task model file; download it once on first use.
+    if not POSE_MODEL_PATH.exists():
+        POSE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=POSE_MODEL_PATH.parent, suffix=".part")
+        os.close(fd)
+        urllib.request.urlretrieve(POSE_MODEL_URL, tmp)
+        os.replace(tmp, POSE_MODEL_PATH)
+    return POSE_MODEL_PATH
 
 
 def _ema(current: tuple[int, int], previous: tuple[int, int], alpha: float = 0.3) -> tuple[int, int]:
@@ -129,7 +144,13 @@ def analyse_video(source: Path, destination: Path, reference_path: Path) -> dict
     if not width or not height:
         raise ValueError("The uploaded file could not be decoded as a video.")
     writer = cv2.VideoWriter(str(destination), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
-    pose = mp.solutions.pose.Pose(min_detection_confidence=0.75, min_tracking_confidence=0.75)
+    options = mp.tasks.vision.PoseLandmarkerOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=str(_pose_model())),
+        running_mode=mp.tasks.vision.RunningMode.VIDEO,
+        min_pose_detection_confidence=0.75,
+        min_tracking_confidence=0.75,
+    )
+    pose = mp.tasks.vision.PoseLandmarker.create_from_options(options)
     smooth: dict[int, tuple[int, int]] = {}
     current: dict[str, list[list[float]]] = {str(key): [] for key in LANDMARKS}
     strokes: list[dict[str, list[list[float]]]] = []
@@ -145,12 +166,13 @@ def analyse_video(source: Path, destination: Path, reference_path: Path) -> dict
             if not ok:
                 break
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = pose.process(rgb)
+            image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            results = pose.detect_for_video(image, int(frame_index * 1000 / fps))
             if not results.pose_landmarks:
                 writer.write(frame)
                 frame_index += 1
                 continue
-            landmarks = results.pose_landmarks.landmark
+            landmarks = results.pose_landmarks[0]
             right_score = sum(landmarks[index].visibility for index in LANDMARKS)
             left_indices = (11, 13, 15, 17, 23, 25, 27)
             left_score = sum(landmarks[index].visibility for index in left_indices)
