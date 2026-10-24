@@ -1,0 +1,11 @@
+{
+  "name": "erg-ai-tts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "say": "node tts_test.ts"
+  },
+  "dependencies": {
+    "@google-cloud/text-to-speech": "^6.0.0"
+  }
+}

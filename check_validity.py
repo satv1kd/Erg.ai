@@ -1,5 +1,5 @@
 from moviepy import VideoFileClip
-import mediapipe as mp
+import pose_compat
 import cv2
 import time
 import os
@@ -9,7 +9,7 @@ video = os.listdir(folder)[0]
 path = os.path.join(folder, video)
 
 def isValid(path):
-    mpPose = mp.solutions.pose
+    mpPose = pose_compat
     pose = mpPose.Pose(min_detection_confidence=0.75,min_tracking_confidence=0.75)
     right_pose_list = [12,14,16,18,24,26,28]
     left_pose_list = [11,13,15,17,23,25,27]

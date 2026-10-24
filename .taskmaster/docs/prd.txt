@@ -1,0 +1,505 @@
+# Erg.ai Live Coach: PRD (RPG format)
+
+Real-time, voice-coached erg technique feedback from a webcam. This is a standalone desktop tool that sits beside `web_app/` and does not depend on it.
+
+---
+
+<overview>
+
+## Problem Statement
+Erg.ai can already analyze a rowing video after the session. The `web_app/` flow is upload, wait, then read the feedback. That is too late to change anything while the athlete is still rowing. A coach on the dock calls out a cue every few strokes and the athlete adjusts right away. The current prototypes can't do that:
+- `main.py` shows angles live in an OpenCV window, but it never compares against a reference and never gives coaching.
+- `toolbox.gpt_wrapper` produces good coaching text, but only offline for a single stored stroke. Mid-piece, a rower can't read text on a screen.
+- Coaching on a single stroke is noisy. Pose jitter and one sloppy stroke lead to misleading cues.
+
+## Target Users
+- **Solo erg athlete** training at home or in a boathouse with a laptop or webcam placed side-on. They want hands-free spoken cues without stopping the piece.
+- **Developer/researcher (the repo owner)** who wants the live pipeline built from the existing `main.py` and `toolbox.py` building blocks, so that improvements flow both ways.
+
+## Success Metrics
+- Camera frames are processed and the overlay is displayed at 15 fps or better on a laptop CPU (MediaPipe PoseLandmarker, "full" model).
+- Stroke detection counts within ±1 stroke over 20 strokes of a clear side-view piece.
+- The first spoken cue starts 15 s or less after the third valid stroke (OpenAI round trip plus Google Cloud TTS).
+- The video loop never blocks or crashes because of network, LLM, or TTS failures. A failure falls back to local text feedback.
+- Cues are based on the average of the last 3 strokes, not on a single stroke.
+
+</overview>
+
+---
+
+<functional-decomposition>
+
+## Capability Tree
+
+### Capability: Live Pose Capture
+Turn camera frames into smoothed, side-normalized body landmarks.
+
+#### Feature: Camera / video source
+- **Description**: Open a webcam by index, or a video file for offline testing, through `cv2.VideoCapture`.
+- **Inputs**: Camera index (default 0) or a file path.
+- **Outputs**: BGR frames plus a timestamp for each frame (wall clock for a camera, frame_idx/fps for a file).
+- **Behavior**: Fail fast with a clear message if the source cannot be opened (for example, macOS camera permission not granted). Stop cleanly at end of stream or on the `q` key.
+
+#### Feature: Visible-side selection
+- **Description**: Decide whether the rower's right or left side faces the camera, or whether they are not visible enough.
+- **Inputs**: MediaPipe pose results.
+- **Outputs**: -1 (not visible enough), 0 (left), or 1 (right).
+- **Behavior**: Reuse `main.determine_right` (summed landmark visibility, sensitivity 0.75). When it returns -1, show the "Please move back so your body is visible" prompt from `main.py` on the frame.
+
+#### Feature: Landmark extraction and smoothing
+- **Description**: Produce pixel points for drawing and canonical points for analysis.
+- **Inputs**: Landmarks, the chosen side, frame width and height, previous smoothed points.
+- **Outputs**: `display_points` (pixel coordinates keyed by right-side IDs 12/14/16/18/24/26/28) and `canonical_points` (the same points, x-mirrored when the left side is visible so the rower always faces right like the reference data).
+- **Behavior**: Map left IDs (11, 13, …) onto right IDs. Apply `main.exponential_moving_average` with alpha 0.275, the value `main.py` uses.
+
+### Capability: Stroke Segmentation
+Split the continuous landmark stream into individual strokes.
+
+#### Feature: Finish/catch state machine
+- **Description**: Port `main.py`'s inline finish/catch detector into a reusable class.
+- **Inputs**: Canonical points and a timestamp for each frame.
+- **Outputs**: A completed `Stroke` (per-landmark point lists, duration, stroke rate in spm, shoulder travel) or `None`.
+- **Behavior**: Uses the same rules as `main.py`. A "finish" is detected when the shoulder x is greater than its value 7 frames earlier. The detector then waits 10 settle frames, and a "catch" is detected when the shoulder x is less than its value 7 frames earlier. When both have occurred, the stroke is emitted and the detector resets.
+
+#### Feature: Stroke validation
+- **Description**: Reject partial or junk strokes.
+- **Inputs**: The candidate stroke and the frame width.
+- **Outputs**: Accept or reject.
+- **Behavior**: Discard the first stroke after start or reset, because recording begins mid-cycle. Require shoulder travel of at least 25% of frame width (the `stroke_counter.py` heuristic, replacing `main.py`'s fixed 700 px), at least 15 frames, and a plausible rate of 10–60 spm. Reset the detector after 1.5 s without a usable pose.
+
+### Capability: Stroke Analysis
+Turn strokes into comparable angle curves.
+
+#### Feature: Per-stroke angle curves
+- **Description**: Compute knee and body angle curves over 0–100% of a stroke.
+- **Inputs**: One stroke (landmark → list of points).
+- **Outputs**: Two 100-sample lists, knee angles and body angles, in degrees.
+- **Behavior**: `toolbox.process_poses` and `stack_poses` resample to 100 points, then `toolbox.calc_angles` runs at each sample.
+
+#### Feature: Sliding-window averaging
+- **Description**: Average the curves of the last 3 valid strokes.
+- **Inputs**: A window of strokes (deque with maxlen 3).
+- **Outputs**: Mean knee and body curves (lists, so they work with `gpt_wrapper`).
+- **Behavior**: Element-wise mean. Strokes whose angle math fails are skipped. Returns nothing if no stroke survives.
+
+#### Feature: Reference curves
+- **Description**: Build the elite reference curves from `ten_strokes.json`.
+- **Inputs**: JSON path, batch index, and the reference video aspect ratio (default 16:9).
+- **Outputs**: Mean reference knee and body curves.
+- **Behavior**: The reference stores coordinates normalized to 0–1, so x is scaled by the aspect ratio before measuring angles; otherwise the angles are distorted. All strokes in the batch are averaged. Loaded once at startup.
+
+#### Feature: Curve comparison
+- **Description**: Compare the averaged user curves with the reference curves.
+- **Inputs**: User and reference knee and body curves.
+- **Outputs**: The same tuple shape as `compare_ref` (curves, peak deviations and their % locations).
+- **Behavior**: Absolute difference per sample, then the maximum and its index.
+
+### Capability: Coaching Feedback
+Turn metrics into short cues that can be spoken.
+
+#### Feature: LLM coaching
+- **Description**: Generate 1–2 coaching cues through the OpenAI API.
+- **Inputs**: Comparison tuple, `OPENAI_API_KEY`.
+- **Outputs**: Feedback text.
+- **Behavior**: Reuse `toolbox.gpt_wrapper` (body opening and finish timing, open/close velocities).
+
+#### Feature: Local fallback
+- **Description**: Produce deterministic feedback when the LLM is unavailable or fails.
+- **Inputs**: The same comparison tuple.
+- **Outputs**: One or two template sentences naming the biggest deviation and where in the stroke it happens.
+- **Behavior**: Used when `--offline` is set, when no API key is configured, or on any exception (`gpt_wrapper` can raise IndexError or ZeroDivisionError on unusual curves).
+
+### Capability: Voice Delivery
+Speak the cues aloud.
+
+#### Feature: Speech synthesis
+- **Description**: Synthesize natural speech with Google Cloud TTS (Gemini TTS, voice "Kore").
+- **Inputs**: Text, a style prompt, `CLOUD_TTS_API_KEY`.
+- **Outputs**: A WAV file (LINEAR16).
+- **Behavior**: Authenticates with an API key, the same way as the existing `Bluetooth_test.synthesize`.
+
+#### Feature: Playback
+- **Description**: Play the synthesized audio on the local machine.
+- **Inputs**: A WAV path.
+- **Outputs**: Audible speech. The temp file is deleted afterwards.
+- **Behavior**: Uses `afplay` on macOS, `aplay` on Linux and `winsound` on Windows. If no player is available, it prints the text instead.
+
+#### Feature: Non-blocking coach worker
+- **Description**: Run analysis, LLM, TTS and playback off the video thread.
+- **Inputs**: A snapshot of the stroke window.
+- **Outputs**: `last_feedback` and a `busy` state shown on the overlay.
+- **Behavior**: One worker thread at a time. A new request is accepted only when the worker is idle and the window is full, so cues slide forward with the window and never overlap.
+
+### Capability: Live Overlay
+Visual feedback in the OpenCV window.
+
+#### Feature: Pose and angle overlay
+- **Description**: Draw the skeleton, knee and body angle arcs, stroke rate and count, coach status, and the latest cue.
+- **Inputs**: Display points, angles, detector state, coach state.
+- **Outputs**: An annotated frame in a cv2 window. Can be disabled with `--headless`.
+- **Behavior**: Reuses `main.right_connections` and `main.draw_pose_graph`. Drawing errors on degenerate geometry are caught so the loop keeps running.
+
+</functional-decomposition>
+
+---
+
+<structural-decomposition>
+
+## Repository Structure
+
+The user constrained the layout: everything new lives in `Bluetooth_test.py`, reusable helpers go into `toolbox.py`, and `main.py` is reused as-is.
+
+```
+Erg.ai-1/
+├── pose_compat.py       # mp.solutions.pose-compatible shim over the MediaPipe Tasks PoseLandmarker
+├── models/              # pose_landmarker_full.task, auto-downloaded (gitignored)
+├── main.py              # (existing, reused) determine_right, exponential_moving_average,
+│                        #   draw_pose_graph, right_connections
+├── toolbox.py           # Stroke Segmentation + Stroke Analysis + Coaching Feedback helpers
+├── Bluetooth_test.py    # Live Pose Capture + Voice Delivery + Coach worker + Live Overlay + CLI
+├── ten_strokes.json     # Reference strokes (read-only for this feature)
+└── .env                 # OPENAI_API_KEY, CLOUD_TTS_API_KEY (gitignored)
+```
+
+## Module Definitions
+
+### Module: pose_compat.py (new, MediaPipe port)
+- **Maps to capability**: Live Pose Capture
+- **Responsibility**: Keep the legacy `mp.solutions.pose` call pattern working on current MediaPipe (1.1.x removed `mp.solutions`). Wraps the Tasks `PoseLandmarker` in VIDEO mode, so every script only changes its import line.
+- **Exports**:
+  - `Pose(min_detection_confidence, min_tracking_confidence)` with `.process(rgb, timestamp_ms=None)`. Returns an object whose `.pose_landmarks.landmark` is the landmark list, or `None`.
+  - `draw_landmarks(img, pose_landmarks, connections)`, `POSE_CONNECTIONS`
+  - `ensure_model()`: downloads `pose_landmarker_full.task` to `models/` on first use.
+
+### Module: main.py (existing, reused)
+- **Maps to capability**: Live Pose Capture (side selection, smoothing), Live Overlay
+- **Responsibility**: Pose helpers from the original prototype. Importing it is side-effect free because its loop sits under `__main__`.
+- **Exports used**: `determine_right()`, `exponential_moving_average()`, `draw_pose_graph()`, `right_connections`, `right_pose_list`, `left_pose_list`
+
+### Module: toolbox.py (extended)
+- **Maps to capability**: Stroke Segmentation, Stroke Analysis, Coaching Feedback
+- **Responsibility**: Pure analysis and feedback logic. No camera or audio I/O.
+- **Exports (new)**:
+  - `Stroke`: dataclass (poses, duration, rate, travel)
+  - `StrokeDetector`: `update(points, timestamp, frame_width) -> Stroke | None`, `reset()`
+  - `stroke_angle_curves(stroke_poses) -> (knee, body)`
+  - `average_angle_curves(strokes) -> (knee, body) | None`
+  - `load_reference_curves(path, batch_index=0, aspect=16/9) -> (knee, body)`
+  - `compare_angle_curves(knee_u, body_u, knee_r, body_r) -> tuple` (same shape as `compare_ref`)
+  - `local_feedback(comparison) -> str`
+  - `coaching_feedback(comparison, use_llm=True) -> (text, generated: bool)`
+- **Changes to existing code**: `find_angle` and `calc_angles` clamp `acos` inputs to [-1, 1]. `gpt_wrapper` no longer prints the API key.
+
+### Module: Bluetooth_test.py (rewritten)
+- **Maps to capability**: Live Pose Capture, Voice Delivery, Coach worker, Live Overlay
+- **Responsibility**: Real-time application shell. It wires the camera, MediaPipe, `toolbox` analysis, OpenAI and Cloud TTS together.
+- **Exports**:
+  - `synthesize(text, prompt, out_path)`: Cloud TTS to WAV
+  - `play_audio(path)`, `speak(text)`
+  - `extract_points(landmarks, side, width, height, smooth)` → (display_points, canonical_points)
+  - `Coach`: background worker (`busy`, `last_feedback`, `submit(strokes)`)
+  - `draw_overlay(...)`
+  - `run(source, window, headless, voice, use_llm)`, `main()` (argparse CLI)
+
+</structural-decomposition>
+
+---
+
+<dependency-graph>
+
+## Dependency Chain
+
+### Foundation Layer (Phase 0)
+No dependencies.
+
+- **pose-compat** (`pose_compat.py`): MediaPipe Tasks PoseLandmarker behind the legacy `mp.solutions.pose` interface.
+- **angle-math** (`toolbox.find_angle`/`calc_angles` with clamping): numerically safe knee and body angles.
+- **pose-helpers** (`main.py`, existing): side selection, EMA, overlay drawing. Imports pose-compat, but only its pose-free helpers are used here.
+- **tts-synthesis** (`Bluetooth_test.synthesize`, `play_audio`, `speak`): text to audible speech.
+
+### Segmentation Layer (Phase 1)
+- **stroke-detector** (`toolbox.Stroke`, `StrokeDetector`): Depends on [pose-helpers] (it ports the `main.py` logic and consumes EMA-smoothed points).
+- **point-extraction** (`Bluetooth_test.extract_points`): Depends on [pose-helpers].
+
+### Analysis Layer (Phase 2)
+- **angle-curves** (`toolbox.stroke_angle_curves`, `average_angle_curves`): Depends on [angle-math, stroke-detector].
+- **reference-curves** (`toolbox.load_reference_curves`): Depends on [angle-curves].
+- **curve-comparison** (`toolbox.compare_angle_curves`): Depends on [angle-curves].
+
+### Feedback Layer (Phase 3)
+- **coaching-feedback** (`toolbox.local_feedback`, `coaching_feedback`, reusing `gpt_wrapper`): Depends on [curve-comparison].
+
+### Application Layer (Phase 4)
+- **coach-worker** (`Bluetooth_test.Coach`): Depends on [coaching-feedback, angle-curves, reference-curves, tts-synthesis].
+- **live-overlay** (`Bluetooth_test.draw_overlay`): Depends on [pose-helpers, angle-math].
+- **realtime-loop** (`Bluetooth_test.run`/`main`): Depends on [pose-compat, point-extraction, stroke-detector, coach-worker, live-overlay].
+
+</dependency-graph>
+
+---
+
+<implementation-roadmap>
+
+## Development Phases
+
+### Phase 0: Foundation
+**Goal**: Safe math and working speech.
+
+**Entry Criteria**: Repository as documented in CLAUDE.md.
+
+**Tasks**:
+- [ ] Port all pose code to the latest MediaPipe via `pose_compat.py` (depends on: none)
+  - Acceptance criteria: `main.py`, `real_time.py`, `stroke_counter.py`, `check_validity.py` and `web_app/analysis.py` run on mediapipe 1.1.x with any Python 3 that has mediapipe wheels.
+  - Test strategy: Process `test_dir/satvik_erg.mp4` and check that landmarks, visibility and `determine_right` match the old behavior.
+- [ ] Clamp acos inputs in `toolbox.find_angle`/`calc_angles` (depends on: none)
+  - Acceptance criteria: Collinear points return 0° or 180° instead of raising ValueError.
+  - Test strategy: Unit test with collinear and nearly collinear points.
+- [ ] Remove the API key print from `gpt_wrapper` (depends on: none)
+  - Acceptance criteria: No secret appears on stdout.
+- [ ] Cloud TTS synthesize and play helpers in `Bluetooth_test.py` (depends on: none)
+  - Acceptance criteria: `speak("test")` is audible on macOS. A missing key raises a clear error instead of `sys.exit`.
+  - Test strategy: Manual listen. Unit test with the TTS client mocked.
+
+**Exit Criteria**: Angle helpers can't crash on degenerate geometry, and speech plays end to end.
+
+**Delivers**: A spoken-cue primitive.
+
+---
+
+### Phase 1: Stroke Segmentation
+**Goal**: Reliable stroke boundaries from a live stream.
+
+**Entry Criteria**: Phase 0 complete.
+
+**Tasks**:
+- [ ] `Stroke` + `StrokeDetector` ported from `main.py` (depends on: pose-helpers)
+  - Acceptance criteria: On `test_dir/satvik_erg.mp4` it detects the same stroke count as `main.py` (±1), with the warm-up stroke discarded.
+  - Test strategy: Synthetic sinusoidal shoulder-x stream with a known period, giving exact stroke count and rate.
+- [ ] `extract_points` with left→right ID mapping and x-mirroring (depends on: pose-helpers)
+  - Acceptance criteria: A horizontally flipped frame yields the same canonical points (±EMA error).
+
+**Exit Criteria**: Running the loop on a video prints one line per detected stroke with its rate.
+
+**Delivers**: Live stroke count and stroke rate.
+
+---
+
+### Phase 2: Stroke Analysis
+**Goal**: Comparable averaged curves.
+
+**Entry Criteria**: Phase 1 complete.
+
+**Tasks**:
+- [ ] `stroke_angle_curves`, `average_angle_curves` (depends on: angle-math, stroke-detector)
+  - Acceptance criteria: Each curve has 100 samples. Averaging three identical strokes returns the same curve.
+- [ ] `load_reference_curves` with aspect correction (depends on: angle-curves)
+  - Acceptance criteria: Loads batch 0 of `ten_strokes.json` (10 strokes) without error.
+- [ ] `compare_angle_curves` (depends on: angle-curves)
+  - Acceptance criteria: Returns the same tuple shape as `compare_ref`, so `gpt_wrapper` accepts it.
+
+**Exit Criteria**: Printing the metrics for a 3-stroke window shows plausible degrees (knee 0–180°, body angle roughly within ±60°).
+
+**Delivers**: Quantified technique deviation per window.
+
+---
+
+### Phase 3: Coaching Feedback
+**Goal**: Text cues that are always available.
+
+**Entry Criteria**: Phase 2 complete.
+
+**Tasks**:
+- [ ] `local_feedback` (depends on: curve-comparison)
+- [ ] `coaching_feedback` wrapping `gpt_wrapper` with fallback (depends on: curve-comparison)
+  - Acceptance criteria: With no key, or with the network down, it returns `(local text, False)` and never raises.
+
+**Exit Criteria**: A cue string is produced for every full window.
+
+**Delivers**: Coaching text.
+
+---
+
+### Phase 4: Real-time Application
+**Goal**: A hands-free live coach.
+
+**Entry Criteria**: Phases 0–3 complete.
+
+**Tasks**:
+- [ ] `Coach` background worker (depends on: coaching-feedback, angle-curves, reference-curves, tts-synthesis)
+  - Acceptance criteria: The video loop's frame time is unaffected while the coach is thinking or speaking. Only one cue is in flight at a time.
+- [ ] `draw_overlay` reusing `main.draw_pose_graph` (depends on: pose-helpers, angle-math)
+- [ ] `run`/`main` CLI: `--camera`, `--video`, `--window`, `--headless`, `--no-voice`, `--offline` (depends on: point-extraction, stroke-detector, coach-worker, live-overlay)
+  - Acceptance criteria: `python Bluetooth_test.py` opens the webcam, and after 3 valid strokes a cue is spoken.
+  - Test strategy: `--video test_dir/satvik_erg.mp4 --headless --no-voice --offline` as a deterministic smoke test.
+
+**Exit Criteria**: A live session with a webcam produces spoken cues every few strokes without stalls.
+
+**Delivers**: Erg.ai Live Coach.
+
+</implementation-roadmap>
+
+---
+
+<test-strategy>
+
+## Test Pyramid
+
+```
+        /\
+       /E2E\       ← 10% (headless video-file smoke run)
+      /------\
+     /Integration\ ← 30% (detector→curves→comparison→feedback with mocked LLM/TTS)
+    /------------\
+   /  Unit Tests  \ ← 60% (angle math, detector on synthetic streams, averaging)
+  /----------------\
+```
+
+## Coverage Requirements
+- Line coverage: 70% minimum for the new `toolbox.py` helpers
+- Branch coverage: 60% minimum
+- Function coverage: 90% minimum for the new helpers
+- Statement coverage: 70% minimum
+- Camera, audio and GUI code paths are exempt and are verified manually.
+
+## Critical Test Scenarios
+
+### StrokeDetector
+**Happy path**:
+- Sinusoidal shoulder x with period 60 frames at 30 fps and amplitude 0.4·width.
+- Expected: about 30 spm, one stroke per period after the warm-up stroke.
+
+**Edge cases**:
+- Small amplitude (travel under 25% of width).
+- Expected: no strokes emitted.
+
+**Error cases**:
+- Pose lost mid-stroke, then `reset()`.
+- Expected: the next stroke is treated as warm-up, with no crash.
+
+### Angle curves and comparison
+**Happy path**:
+- User equals reference.
+- Expected: all deviations are 0.
+
+**Edge cases**:
+- Hip equals shoulder (zero-length body).
+- Expected: the stroke is skipped by `average_angle_curves` and the result is not a crash.
+
+### Coaching feedback
+**Error cases**:
+- `gpt_wrapper` raises, or `OPENAI_API_KEY` is missing.
+- Expected: local fallback text and `generated=False`.
+
+**Integration points**:
+- Coach worker with mocked `coaching_feedback` and `speak`.
+- Expected: `busy` toggles, `last_feedback` is set, and `submit` returns False while busy.
+
+## Test Generation Guidelines
+- Use pytest. Feed synthetic landmark dicts keyed by int IDs; don't run MediaPipe in unit tests.
+- Never call OpenAI or Cloud TTS in tests. Monkeypatch `toolbox.OpenAI` and `Bluetooth_test.texttospeech`.
+- Don't write to `ten_strokes.json` or `user_strokes.json` from tests.
+
+</test-strategy>
+
+---
+
+<architecture>
+
+## System Components
+```
+camera ──frames──► MediaPipe Pose ──► extract_points ──► StrokeDetector ──Stroke──► window(deque, 3)
+   │                                        │                                         │ full & coach idle
+   │                                        ▼                                         ▼
+   └──────────────► draw_overlay ◄── angles / rate / coach status            Coach thread:
+                        │                                                 average curves → compare
+                        ▼                                                 → gpt_wrapper | fallback
+                   cv2.imshow                                             → Cloud TTS → speaker
+```
+The video loop is single-threaded. Exactly one coach worker thread may run at a time.
+
+## Data Models
+- **Points**: `dict[int, tuple[float, float]]` keyed by right-side MediaPipe IDs 12/14/16/18/24/26/28, in pixel space. Canonical points are x-mirrored when the left side is visible.
+- **Stroke**: `poses: dict[int, list[tuple]]` (the same shape as one entry of `user_strokes.json`), `duration` (s), `rate` (spm), `travel` (fraction of width).
+- **Comparison tuple**: `(knee_u, body_u, knee_r, body_r, max_knee_diff, max_knee_loc, max_body_diff, max_body_loc)`. This is `compare_ref`'s shape and what `gpt_wrapper` expects.
+
+## Technology Stack
+Python 3 (no version pin; mediapipe 1.1.x ships `py3-none` wheels), OpenCV, MediaPipe 1.1.x Tasks `PoseLandmarker` (through `pose_compat.py`), NumPy, OpenAI Python SDK, google-cloud-texttospeech ≥ 2.29 (Gemini TTS), python-dotenv.
+
+**Decision: background thread for the coach instead of asyncio or multiprocessing**
+- **Rationale**: The OpenAI and TTS calls are I/O-bound, and the cv2 loop is synchronous. A thread is the simplest way to keep frames flowing.
+- **Trade-offs**: The GIL is held briefly during numpy work, which is negligible.
+- **Alternatives considered**: An asyncio rewrite of the loop (too invasive), multiprocessing (state transfer overhead).
+
+**Decision: port `main.py`'s detector rather than the `web_app` turn-counter**
+- **Rationale**: The user asked to reuse `main.py`. Its rules are already tuned on `satvik_erg.mp4`.
+- **Trade-offs**: It inherits the `main.py` heuristics (a 7-frame lookback and a 10-frame settle), which assume roughly 30 fps.
+- **Alternatives considered**: The `web_app/analysis.py` direction-reversal counter.
+
+**Decision: WAV (LINEAR16) instead of MP3 for TTS output**
+- **Rationale**: Playable by `afplay`, `aplay` and `winsound` without extra dependencies.
+- **Trade-offs**: Larger temp files, which are irrelevant for short cues.
+
+</architecture>
+
+---
+
+<risks>
+
+## Technical Risks
+**Risk**: The reference aspect ratio is unknown. `ten_strokes.json` stores normalized coordinates, and the angles depend on the source video's aspect ratio.
+- **Impact**: Medium. There is a systematic angle bias versus the reference.
+- **Likelihood**: Medium
+- **Mitigation**: Assume 16:9 (YouTube) and expose `aspect` as a parameter.
+- **Fallback**: Re-extract the reference with pixel coordinates and record the frame size.
+
+**Risk**: Heuristics tuned on video fail on a live camera (different fps or framing).
+- **Impact**: High. No strokes are detected, so there is no feedback.
+- **Likelihood**: Medium
+- **Mitigation**: Timestamps come from the wall clock, and travel is relative to frame width. The overlay shows the stroke count so the failure is visible.
+- **Fallback**: Make the lookback and settle frames scale with the measured fps.
+
+**Risk**: `gpt_wrapper` is fragile. It indexes `extrema[extrema >= 60][0]` and divides by index differences.
+- **Impact**: Low, because it is caught by the fallback.
+- **Likelihood**: Medium
+- **Mitigation**: Wrap it in `coaching_feedback`.
+
+**Risk**: Latency. The LLM round trip plus TTS can exceed 10 s, so the cue arrives several strokes late.
+- **Impact**: Medium
+- **Likelihood**: Medium
+- **Mitigation**: Use a short prompt and a mini model. The status shows "thinking…".
+- **Fallback**: Speak the local fallback immediately and replace it with the LLM version later.
+
+## Dependency Risks
+- MediaPipe 0.10.30+ removed `mp.solutions`. `pose_compat.py` isolates the Tasks API, so a future API change only touches that file (and `web_app/analysis.py`, which ports inline to stay self-contained).
+- The first run downloads the ~9 MB `pose_landmarker_full.task` model, so it needs network access once.
+- mediapipe 1.1.x wheels cover macOS arm64, Linux and Windows. Intel Macs aren't covered.
+- Google Cloud TTS Gemini voices need the `prompt` field (google-cloud-texttospeech ≥ 2.29) and an API key with Text-to-Speech enabled.
+- macOS requires camera permission for the terminal or VS Code.
+
+## Scope Risks
+- Merging with `web_app/` is explicitly out of scope for now.
+- The filename `Bluetooth_test.py` is kept at the user's request. A future rename to `live_coach.py` is recommended.
+
+</risks>
+
+---
+
+<appendix>
+
+## References
+- MediaPipe Pose landmark IDs: https://developers.google.com/mediapipe/solutions/vision/pose_landmarker
+- Google Cloud Gemini-TTS: https://cloud.google.com/text-to-speech/docs/gemini-tts
+- Repo docs: `CLAUDE.md`
+
+## Glossary
+- **Catch / finish**: The front and back ends of the rowing stroke.
+- **Body angle**: The torso angle from vertical at the hip, signed forward or back.
+- **spm**: Strokes per minute.
+- **Window**: The last N (default 3) valid strokes used for averaging.
+
+## Open Questions
+- Should cues be rate-limited by time (for example, at most one every 20 s) as well as by coach availability?
+- Should live strokes also be appended to `user_strokes.json` for later analysis?
+- Is a 16:9 reference aspect correct for every batch in `ten_strokes.json`?
+
+</appendix>

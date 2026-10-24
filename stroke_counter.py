@@ -1,4 +1,4 @@
-import mediapipe as mp
+import pose_compat
 import cv2
 import json
 import os
@@ -15,7 +15,7 @@ def check_validity(path):
     cap = cv2.VideoCapture(path)
 
     fps = cap.get(cv2.CAP_PROP_FPS)
-    mpPose = mp.solutions.pose
+    mpPose = pose_compat
     pose = mpPose.Pose(min_detection_confidence=0.85,min_tracking_confidence=0.85)
     right_pose_list = [8,12,14,16,18,24,26,28]
     left_pose_list = [7,11,13,15,17,23,25,27]

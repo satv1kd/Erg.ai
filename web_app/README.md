@@ -5,11 +5,15 @@ the interactive loops in the repository's `main.py` or `toolbox.py`.
 
 ## Run locally
 
+Dependencies are listed in the repository-root `requirements.txt`, which is
+shared with the root scripts. Install from the repository root, then start the
+server from `web_app/` so `from analysis import ...` resolves:
+
 ```powershell
-cd web_app
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+cd web_app
 $env:OPENAI_API_KEY = "..." # optional; enables generated coaching feedback
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
