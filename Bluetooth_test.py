@@ -25,6 +25,11 @@ from collections import deque
 import cv2
 from google.cloud import texttospeech
 
+try:
+    import sounddevice as sd  # streams TTS audio as it arrives; optional
+except (ImportError, OSError):  # OSError: PortAudio library missing
+    sd = None
+
 import main as prototype  # pose helpers from the original prototype
 import pose_compat
 import toolbox  # also loads .env (OPENAI_API_KEY)
@@ -33,6 +38,7 @@ import toolbox  # also loads .env (OPENAI_API_KEY)
 
 VOICE = "en-US-Chirp3-HD-Kore"  # ~0.6s per cue vs ~3.2s for Gemini-TTS Kore, but no style prompt
 LANGUAGE = "en-US"
+SAMPLE_RATE = 24000             # Chirp3-HD native rate; streamed as 16-bit mono PCM
 
 REFERENCE_PATH = "ten_strokes.json"
 FRAME_WIDTH = 1280        # frames are resized to this width (keeps overlay text sizes sane)
@@ -45,20 +51,49 @@ _tts_client = None
 
 # ------------------Voice------------------
 
-def synthesize(text: str, out_path: str = "output.wav") -> str:
-    # LINEAR16 is a WAV, which afplay/aplay/winsound can all play without extra deps
+def _client():
     # Auth is Application Default Credentials (gcloud auth application-default login),
     # billed to the ADC quota project; no API key
     global _tts_client
     if _tts_client is None:
         _tts_client = texttospeech.TextToSpeechClient()
+    return _tts_client
 
-    response = _tts_client.synthesize_speech(
-        input=texttospeech.SynthesisInput(text=text),
-        voice=texttospeech.VoiceSelectionParams(
-            language_code=LANGUAGE,
-            name=VOICE,
+
+def _voice():
+    return texttospeech.VoiceSelectionParams(language_code=LANGUAGE, name=VOICE)
+
+
+def stream_speech(text: str) -> None:
+    # Plays each PCM chunk as it arrives: first audio in ~0.2s instead of waiting for the whole clip
+    config = texttospeech.StreamingSynthesizeConfig(
+        voice=_voice(),
+        streaming_audio_config=texttospeech.StreamingAudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.PCM,
+            sample_rate_hertz=SAMPLE_RATE,
         ),
+    )
+
+    def requests():
+        yield texttospeech.StreamingSynthesizeRequest(streaming_config=config)
+        yield texttospeech.StreamingSynthesizeRequest(input=texttospeech.StreamingSynthesisInput(text=text))
+
+    carry = b""  # int16 samples are 2 bytes; hold an odd trailing byte for the next chunk
+    with sd.RawOutputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16") as out:
+        for response in _client().streaming_synthesize(requests()):
+            data = carry + response.audio_content
+            cut = len(data) - len(data) % 2
+            carry = data[cut:]
+            if cut:
+                out.write(data[:cut])
+    # leaving the with-block stops the stream, which waits for queued audio to finish playing
+
+
+def synthesize(text: str, out_path: str = "output.wav") -> str:
+    # LINEAR16 is a WAV, which afplay/aplay/winsound can all play without extra deps
+    response = _client().synthesize_speech(
+        input=texttospeech.SynthesisInput(text=text),
+        voice=_voice(),
         audio_config=texttospeech.AudioConfig(
             audio_encoding=texttospeech.AudioEncoding.LINEAR16,
         ),
@@ -84,6 +119,10 @@ def play_audio(path: str) -> bool:
 
 
 def speak(text: str) -> bool:
+    if sd is not None:
+        stream_speech(text)
+        return True
+    # No sounddevice: fetch the whole WAV, then play it with the OS player
     fd, path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     try:
