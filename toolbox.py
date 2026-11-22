@@ -131,7 +131,10 @@ def compare_ref(pose_list, ref_list):
     print(f"Body angle deviates {round(body_rmse)}% from the reference stroke on average")
     return p_knee_angles, p_body_angles, r_knee_angles, r_body_angles, max_knee_diff, max_knee_loc, max_body_diff, max_body_loc
 
-def gpt_wrapper(knee_user, body_user, knee_ref, body_ref, max_knee_d, max_knee_l, max_body_d, max_body_l):
+def gpt_wrapper(knee_user, body_user, knee_ref, body_ref, max_knee_d, max_knee_l, max_body_d, max_body_l,
+                timing=None, ref_timing=None):
+    # timing / ref_timing: StrokeTiming with the detected catch and finish on the 0-100% curves.
+    # Without them, assume 0% = catch and the body-angle minimum (max layback) = finish.
     # Initialization
     user_body_finish_angle = min(body_user)
     user_body_finish_time = body_user.index(user_body_finish_angle) + 1 # 1 indexed (1-100%)
@@ -144,7 +147,8 @@ def gpt_wrapper(knee_user, body_user, knee_ref, body_ref, max_knee_d, max_knee_l
     body_u_gradient = np.gradient(body_user)
     extrema_u = np.where(abs(body_u_gradient) < THRESHOLD)[0]
     candidates_u = extrema_u[extrema_u <= 25]
-    stable_u_b_finish_idx = extrema_u[extrema_u >= 60][0]
+    settled_u = extrema_u[extrema_u >= 60]
+    stable_u_b_finish_idx = settled_u[0] if len(settled_u) > 0 else len(body_user) - 1
     body_u_open_idx = candidates_u[-1] if len(candidates_u) > 0 else 0
     body_u_open_vel = round((user_body_finish_angle - body_user[body_u_open_idx]) / (user_body_finish_time - body_u_open_idx), 2)
     body_u_close_vel = round((body_user[stable_u_b_finish_idx] - user_body_finish_angle) / (stable_u_b_finish_idx - user_body_finish_time), 2)
@@ -157,7 +161,8 @@ def gpt_wrapper(knee_user, body_user, knee_ref, body_ref, max_knee_d, max_knee_l
     # plt.show()
     extrema_r = np.where(abs(body_r_gradient) < THRESHOLD)[0]
     candidates_r = extrema_r[extrema_r <= 25]
-    stable_r_b_finish_idx = extrema_r[extrema_r >= 60][0]
+    settled_r = extrema_r[extrema_r >= 60]
+    stable_r_b_finish_idx = settled_r[0] if len(settled_r) > 0 else len(body_ref) - 1
     body_r_open_idx = candidates_r[-1] if len(candidates_r) > 0 else 0
     body_r_open_vel = round((ref_body_finish_angle - body_ref[body_r_open_idx]) / (ref_body_finish_time - body_r_open_idx), 2)
     body_r_close_vel = round((body_ref[stable_r_b_finish_idx] - ref_body_finish_angle) / (stable_r_b_finish_idx - ref_body_finish_time), 2)
@@ -171,17 +176,30 @@ def gpt_wrapper(knee_user, body_user, knee_ref, body_ref, max_knee_d, max_knee_l
     fast_or_slow_c = "faster" if close_percent_diff > 0 else "slower"
 
     system = """
-    You are an experienced rowing coach analyzing an athlete's erg stroke 
-    compared to an elite reference stroke. 
+    You are an experienced rowing coach providing feedback on an athlete's erg stroke. 
+
+    Optimal stroke (slight variations are fine but user strokes should follow this):
+    - Body held forward in the catch and stable during first half of drive
+        - Hips and torso should move as one unit 
+    - Body opens through second half of drive as hips are moving
+        - Don't open the back as soon as you push with the legs
+    - For the recovery reset arms first, then the body, then finally the knees
+        - Arms and body must be set in recovery position before the slide moves
+        - Small overlap between body and arm motion is fine, especially at higher stroke ratings
+    
     
     Rules:
     - Give exactly 1-2 coaching cues, prioritized by impact
-    - Be specific about timing and numbers
+    - Be specific about timing. Use numbers to guide your response but timestamps should be qualitative
+        - Halfway through the drive, start of recovery, etc
+        - Mention what the user is doing wrong too, don't just recite the optimal stroke
     - Sound like a coach talking to an athlete, not a data report
     - Do not recommend they fix everything at once
+
     
-    Important: 0-100% represents the ENTIRE stroke (0% = catch, 100% = return to catch)
-    Body should ideally start opening at the middle of the drive, so around 20-30%.
+    Timing: the catch (shoulders furthest forward) and finish (shoulders furthest back) are
+    detected from the athlete's movement. Every event below is already placed relative to
+    them, e.g. "halfway through the drive". Speak in those terms, not percentages.
     
     """
     '''
@@ -194,15 +212,41 @@ def gpt_wrapper(knee_user, body_user, knee_ref, body_ref, max_knee_d, max_knee_l
     Peak body angle deviation: {max_body_d}° at {max_body_l}% of the stroke
     Peak knee angle deviation: {max_knee_d}° at {max_knee_l}% of the stroke 
     '''
-    #TODO: add timestamps for stroke segments here
+    if timing is None:
+        timing = StrokeTiming(0, user_body_finish_time, 100)
+    if ref_timing is None:
+        ref_timing = StrokeTiming(0, ref_body_finish_time, 100)
+
+    # Velocities above are degrees per 1% of the curve; convert to degrees/second when the clock is known
+    if timing.span_s:
+        to_s = 100 / timing.span_s
+        open_vel = f"{abs(round(body_u_open_vel * to_s, 1))}°/s"
+        close_vel = f"{abs(round(body_u_close_vel * to_s, 1))}°/s"
+    else:
+        open_vel, close_vel = f"{abs(body_u_open_vel)}° per 1% of stroke", f"{abs(body_u_close_vel)}° per 1% of stroke"
+
+    if timing.drive_s is not None:
+        rhythm = (f"- Drive {timing.drive_s:.2f}s, recovery {timing.recovery_s:.2f}s "
+                  f"(1:{timing.recovery_s / timing.drive_s:.1f} ratio, ~{60 / (timing.drive_s + timing.recovery_s):.0f} spm)")
+    else:
+        rhythm = "- Drive and recovery durations unknown"
+    rhythm += (f"\n    - Drive is {timing.drive_share:.0%} of the stroke "
+               f"(reference: {ref_timing.drive_share:.0%})")
+
     user = f"""
-    User metrics:
-    - Body opening initiates at: {body_u_open_idx}% of stroke 
-    - User finish location: {user_body_finish_time}% of stroke 
-    - Body opening average velocity from start to finish: {body_u_open_vel}°/s 
-    - Body closing average velocity from start to finish: {body_u_close_vel}°/s 
-    - Body angle at catch: {body_user[0]}° 
-    - Knee angle at catch: {knee_user[0]}° 
+    Stroke rhythm:
+    {rhythm}
+
+    User metrics (reference in brackets):
+    - Body starts opening {timing.describe(body_u_open_idx)} [{ref_timing.describe(body_r_open_idx)}]
+    - Maximum layback {timing.describe(user_body_finish_time)} [{ref_timing.describe(ref_body_finish_time)}]
+    - Body settles forward again {timing.describe(stable_u_b_finish_idx)} [{ref_timing.describe(stable_r_b_finish_idx)}]
+    - Body opening speed: {open_vel}, {abs(open_percent_diff)}% {fast_or_slow_o} than reference
+    - Body closing speed: {close_vel}, {abs(close_percent_diff)}% {fast_or_slow_c} than reference
+    - Body angle at catch: {body_user[0]}° [{body_ref[0]}°]
+    - Knee angle at catch: {knee_user[0]}° [{knee_ref[0]}°]
+    - Largest body-angle gap: {round(max_body_d)}° {timing.describe(max_body_l)}
+    - Largest knee-angle gap: {round(max_knee_d)}° {timing.describe(max_knee_l)}
      """
 
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -500,7 +544,7 @@ def coaching_feedback(comparison, use_llm=True, timing=None, ref_timing=None):
     # timing / ref_timing: StrokeTiming catch/finish markers for the user and reference curves
     if use_llm and os.environ.get("OPENAI_API_KEY"):
         try:
-            text = gpt_wrapper(*comparison)
+            text = gpt_wrapper(*comparison, timing=timing, ref_timing=ref_timing)
             if text:
                 return strip_asterisks(text).strip(), True
         except Exception as exc:
