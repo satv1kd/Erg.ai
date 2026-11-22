@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from openai import OpenAI
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 
