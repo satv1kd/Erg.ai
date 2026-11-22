@@ -1,5 +1,6 @@
 <rpg-method>
 # Repository Planning Graph (RPG) Method - PRD Template
+# Good for complex software
 
 This template teaches you (AI or human) how to create structured, dependency-aware PRDs using the RPG methodology from Microsoft Research. The key insight: separate WHAT (functional) from HOW (structural), then connect them with explicit dependencies.
 

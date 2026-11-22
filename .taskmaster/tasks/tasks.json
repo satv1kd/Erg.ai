@@ -1,0 +1,182 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": 1,
+        "title": "Create test infrastructure and fixtures",
+        "description": "Set up pytest infrastructure with shared fixtures for synthetic landmark data, mock TTS/OpenAI clients, and reference stroke data that unit tests can use without external dependencies.",
+        "details": "Create tests/ directory at repo root with:\n\n1. tests/__init__.py (empty)\n2. tests/conftest.py with fixtures:\n   - `synthetic_landmarks` - returns a dict keyed by right-side IDs (12,14,16,18,24,26,28) with (x,y) tuples at known positions\n   - `sinusoidal_shoulder_stream` - generates frames of points where shoulder x follows sin(t) with configurable period and amplitude\n   - `mock_openai_response` - patches toolbox.OpenAI to return a canned coaching string\n   - `mock_tts_client` - patches google.cloud.texttospeech.TextToSpeechClient\n   - `sample_stroke` - returns a Stroke object with valid poses, duration, rate, travel\n   - `reference_curves` - returns pre-computed (knee_curve, body_curve) as lists\n3. Add pytest and pytest-cov to requirements.txt\n4. Create pytest.ini with coverage thresholds:\n   [pytest]\n   addopts = --cov=toolbox --cov=Bluetooth_test --cov-fail-under=70\n\nFixture implementation pattern:\n```python\nimport pytest\nimport numpy as np\n\n@pytest.fixture\ndef synthetic_landmarks():\n    # Right-facing rower at catch position\n    return {\n        12: (0.6, 0.3),   # shoulder\n        14: (0.65, 0.45), # elbow\n        16: (0.7, 0.5),   # wrist\n        18: (0.72, 0.52), # pinky\n        24: (0.4, 0.5),   # hip\n        26: (0.35, 0.7),  # knee\n        28: (0.5, 0.85),  # ankle\n    }\n```",
+        "testStrategy": "Run `pytest tests/conftest.py --collect-only` to verify fixtures are discoverable. Confirm fixtures return correct types by writing a minimal test that uses each fixture.",
+        "priority": "high",
+        "dependencies": [],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 2,
+        "title": "Add unit tests for angle math functions",
+        "description": "Test find_angle and calc_angles in toolbox.py for normal cases, boundary conditions (collinear points, zero-length segments), and ensure acos clamping prevents ValueError.",
+        "details": "Create tests/test_angle_math.py:\n\n1. test_find_angle_right_angle - isoceles right triangle should return 90 degrees\n2. test_find_angle_straight_line - collinear points (a+c=b) should return 0 or 180, not crash\n3. test_find_angle_float_error - points that produce acos argument slightly > 1 due to float error should clamp to 1\n4. test_calc_angles_normal - known geometry returns expected knee/body angles\n5. test_calc_angles_collinear - hip==knee or knee==ankle returns angles without ValueError\n6. test_calc_angles_zero_body - shoulder directly above hip returns body_angle near 0\n7. test_calc_angles_forward_lean - shoulder ahead of hip returns positive body_angle\n8. test_calc_angles_backward_lean - shoulder behind hip returns negative body_angle\n\n```python\nimport pytest\nimport math\nfrom toolbox import find_angle, calc_angles\n\ndef test_find_angle_right_angle():\n    # 3-4-5 right triangle: angle opposite side 5 is 90 degrees\n    angle = find_angle(3, 5, 4)  # a=3, b=5, c=4 -> angle at vertex opposite b\n    assert abs(math.degrees(angle) - 90) < 0.1\n\ndef test_find_angle_collinear():\n    # a + c = b means points are collinear, acos(-1) = pi\n    angle = find_angle(1, 3, 2)\n    assert abs(angle - math.pi) < 0.01\n\ndef test_calc_angles_zero_division():\n    # Hip equals knee - should not raise\n    hip = (100, 100)\n    knee = (100, 100)  # same as hip\n    ankle = (150, 200)\n    shoulder = (100, 50)\n    # Should not raise ZeroDivisionError\n    try:\n        result = calc_angles(hip, knee, ankle, shoulder)\n    except ZeroDivisionError:\n        pytest.fail(\"calc_angles raised ZeroDivisionError on degenerate input\")\n```",
+        "testStrategy": "Run `pytest tests/test_angle_math.py -v`. All tests should pass. Coverage of find_angle and calc_angles should reach 100%.",
+        "priority": "high",
+        "dependencies": [
+          1
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 3,
+        "title": "Add unit tests for StrokeDetector",
+        "description": "Test the StrokeDetector class with synthetic shoulder movement streams to verify stroke detection, warm-up discard, travel validation, and rate bounds.",
+        "details": "Create tests/test_stroke_detector.py:\n\n1. test_sinusoidal_stroke_count - feed 60 frames at 30fps with shoulder x = 0.5 + 0.3*sin(2*pi*t/60). Expect 1 stroke per period after warm-up.\n2. test_warmup_discarded - first stroke after reset() is discarded\n3. test_small_travel_rejected - amplitude < 0.25*width should not emit strokes\n4. test_rate_bounds - strokes outside 10-60 spm are rejected\n5. test_min_frames_required - stroke with < 15 frames is rejected\n6. test_reset_clears_state - after reset(), pose buffer is empty and finish/catch are False\n7. test_stroke_dataclass_fields - returned Stroke has poses, duration, rate, travel attributes\n\n```python\nimport pytest\nimport math\nfrom toolbox import Stroke, StrokeDetector\n\ndef test_sinusoidal_strokes():\n    detector = StrokeDetector(min_travel=0.25, min_frames=15, min_rate=10, max_rate=60)\n    fps = 30\n    frame_width = 1000\n    period = 60  # 1 stroke = 60 frames = 2 seconds = 30 spm\n    strokes = []\n    for frame in range(180):  # 3 full periods\n        t = frame / fps\n        shoulder_x = 500 + 350 * math.sin(2 * math.pi * frame / period)\n        points = {12: (shoulder_x, 300), 24: (400, 500), 26: (350, 700), 28: (500, 850)}\n        stroke = detector.update(points, t, frame_width)\n        if stroke:\n            strokes.append(stroke)\n    # Expect 2 strokes (first is warm-up, periods 2 and 3 emit)\n    assert len(strokes) == 2\n    assert all(isinstance(s, Stroke) for s in strokes)\n    assert all(28 < s.rate < 32 for s in strokes)  # ~30 spm\n```",
+        "testStrategy": "Run `pytest tests/test_stroke_detector.py -v`. Verify stroke counts match expectations. Use parametrize for rate bounds testing.",
+        "priority": "high",
+        "dependencies": [
+          1
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 4,
+        "title": "Add unit tests for angle curve functions",
+        "description": "Test stroke_angle_curves, average_angle_curves, and compare_angle_curves for correct output shapes, averaging behavior, and comparison metrics.",
+        "details": "Create tests/test_angle_curves.py:\n\n1. test_stroke_angle_curves_length - output has 100 samples each\n2. test_stroke_angle_curves_range - knee angles in [0, 180], body angles in [-90, 90]\n3. test_average_curves_identical - averaging 3 identical strokes returns the same curve\n4. test_average_curves_skips_invalid - strokes with missing keys are skipped, not crashed\n5. test_average_curves_empty_returns_none - no valid strokes returns None\n6. test_compare_equal_curves - identical curves have 0 deviation\n7. test_compare_different_curves - deviation equals known difference\n8. test_compare_output_shape - returns 8-tuple matching gpt_wrapper expectation\n\n```python\nimport pytest\nfrom toolbox import stroke_angle_curves, average_angle_curves, compare_angle_curves\n\ndef test_stroke_angle_curves_length(sample_stroke):\n    knee, body = stroke_angle_curves(sample_stroke.poses)\n    assert len(knee) == 100\n    assert len(body) == 100\n\ndef test_average_identical_curves():\n    poses = {\n        '12': [(0.6, 0.3)] * 50,\n        '24': [(0.4, 0.5)] * 50,\n        '26': [(0.35, 0.7)] * 50,\n        '28': [(0.5, 0.85)] * 50,\n    }\n    single_knee, single_body = stroke_angle_curves(poses)\n    avg_knee, avg_body = average_angle_curves([poses, poses, poses])\n    assert avg_knee == [round(float(v), 1) for v in single_knee]\n\ndef test_compare_equal_curves():\n    curve = [45.0] * 100\n    result = compare_angle_curves(curve, curve, curve, curve)\n    assert result[4] == 0  # max_knee_diff\n    assert result[6] == 0  # max_body_diff\n```",
+        "testStrategy": "Run `pytest tests/test_angle_curves.py -v`. All assertions pass. Coverage of stroke_angle_curves, average_angle_curves, compare_angle_curves reaches 90%+.",
+        "priority": "high",
+        "dependencies": [
+          1,
+          2
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 5,
+        "title": "Add unit tests for coaching feedback functions",
+        "description": "Test local_feedback, coaching_feedback, and strip_asterisks to verify fallback behavior, LLM error handling, and markdown stripping.",
+        "details": "Create tests/test_coaching.py:\n\n1. test_local_feedback_body_dominant - when max_body_d >= max_knee_d, cue mentions body\n2. test_local_feedback_knee_dominant - when max_knee_d > max_body_d, cue mentions knee\n3. test_local_feedback_timing - large finish difference adds timing note\n4. test_coaching_feedback_no_key - with no OPENAI_API_KEY, returns (local_text, False)\n5. test_coaching_feedback_api_error - monkeypatch OpenAI to raise, returns fallback\n6. test_coaching_feedback_success - monkeypatch OpenAI to return text, returns (text, True)\n7. test_strip_asterisks_bold - \"**bold**\" becomes \"bold\"\n8. test_strip_asterisks_bullets - lines starting with \"* \" lose the prefix\n\n```python\nimport pytest\nimport os\nfrom toolbox import local_feedback, coaching_feedback, strip_asterisks\n\ndef test_local_feedback_body():\n    comparison = (\n        [45]*100, [30]*100,  # knee_user, body_user\n        [45]*100, [25]*100,  # knee_ref, body_ref (body differs by 5)\n        3.0, 50,             # max_knee_d, max_knee_l\n        5.0, 50              # max_body_d, max_body_l (body > knee)\n    )\n    cue = local_feedback(comparison)\n    assert \"body angle\" in cue.lower()\n\ndef test_coaching_feedback_no_key(monkeypatch):\n    monkeypatch.delenv(\"OPENAI_API_KEY\", raising=False)\n    comparison = ([45]*100, [30]*100, [45]*100, [30]*100, 0, 0, 0, 0)\n    text, generated = coaching_feedback(comparison, use_llm=True)\n    assert not generated\n    assert len(text) > 0\n\ndef test_strip_asterisks():\n    assert strip_asterisks(\"**bold** text\") == \"bold text\"\n    assert strip_asterisks(\"* bullet\") == \"bullet\"\n```",
+        "testStrategy": "Run `pytest tests/test_coaching.py -v`. Verify fallback is always returned on error. Never call real OpenAI in tests.",
+        "priority": "medium",
+        "dependencies": [
+          1,
+          4
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 6,
+        "title": "Add unit tests for reference curve loading",
+        "description": "Test load_reference_curves with a minimal test fixture to verify aspect ratio scaling, batch selection, and error handling for missing/empty batches.",
+        "details": "Create tests/test_reference_loading.py:\n\n1. Create tests/fixtures/test_reference.json with 2 batches, one empty and one with 2 strokes\n2. test_load_default_batch - batch_index=0 loads first non-empty batch\n3. test_load_aspect_scaling - x coordinates are multiplied by aspect ratio\n4. test_load_invalid_batch_raises - batch with missing keys raises ValueError\n5. test_load_empty_file_raises - empty JSON raises appropriately\n\nTest fixture (tests/fixtures/test_reference.json):\n```json\n[\n  [],\n  [\n    {\"12\": [[0.6, 0.3]], \"24\": [[0.4, 0.5]], \"26\": [[0.35, 0.7]], \"28\": [[0.5, 0.85]]},\n    {\"12\": [[0.6, 0.3]], \"24\": [[0.4, 0.5]], \"26\": [[0.35, 0.7]], \"28\": [[0.5, 0.85]]}\n  ]\n]\n```\n\n```python\nimport pytest\nfrom pathlib import Path\nfrom toolbox import load_reference_curves\n\nFIXTURE_PATH = Path(__file__).parent / \"fixtures\" / \"test_reference.json\"\n\ndef test_load_reference_curves():\n    knee, body = load_reference_curves(str(FIXTURE_PATH), batch_index=1, aspect=16/9)\n    assert len(knee) == 100\n    assert len(body) == 100\n\ndef test_load_empty_batch_raises():\n    with pytest.raises(ValueError, match=\"No usable\"):\n        load_reference_curves(str(FIXTURE_PATH), batch_index=0)\n```",
+        "testStrategy": "Run `pytest tests/test_reference_loading.py -v`. Verify batch selection works and aspect scaling affects angle computation.",
+        "priority": "medium",
+        "dependencies": [
+          1,
+          4
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 7,
+        "title": "Add unit tests for Bluetooth_test.py helpers",
+        "description": "Test extract_points, Coach class, and TTS/playback functions with mocked external dependencies to ensure the video loop won't crash.",
+        "details": "Create tests/test_live_coach.py:\n\n1. test_extract_points_right_side - side=1 returns canonical == display\n2. test_extract_points_left_side - side=0 mirrors x coordinates\n3. test_extract_points_ema - successive calls smooth points\n4. test_coach_not_busy_initially - Coach.busy is False at start\n5. test_coach_submit_starts_thread - submit() returns True and sets busy\n6. test_coach_submit_while_busy - second submit() returns False\n7. test_coach_status_transitions - status goes idle -> analyzing -> thinking -> speaking -> idle\n8. test_speak_no_sounddevice - with sd=None and mock synthesize, speak() calls play_audio\n9. test_play_audio_darwin - on macOS, calls subprocess.run with afplay\n\n```python\nimport pytest\nfrom unittest.mock import patch, MagicMock\nimport Bluetooth_test\nfrom toolbox import Stroke\n\ndef test_extract_points_left_mirror():\n    # Create mock landmarks\n    class MockLM:\n        def __init__(self, x, y):\n            self.x, self.y = x, y\n    landmarks = {i: MockLM(0.3, 0.5) for i in range(29)}\n    smooth = {}\n    width, height = 1000, 800\n    display, canonical = Bluetooth_test.extract_points(landmarks, side=0, width=width, height=height, smooth=smooth)\n    # Left side: canonical x should be mirrored\n    assert canonical[12][0] == width - display[12][0]\n\n@patch('Bluetooth_test.toolbox')\ndef test_coach_submit(mock_toolbox):\n    mock_toolbox.load_reference_curves.return_value = ([0]*100, [0]*100)\n    mock_toolbox.average_angle_curves.return_value = ([0]*100, [0]*100)\n    mock_toolbox.compare_angle_curves.return_value = tuple([0]*8)\n    mock_toolbox.coaching_feedback.return_value = (\"test\", False)\n    \n    coach = Bluetooth_test.Coach(([0]*100, [0]*100), use_llm=False, voice=False)\n    stroke = Stroke(poses={12: [(0,0)]}, duration=2.0, rate=30, travel=0.3)\n    assert coach.submit([stroke])\n    coach.join(timeout=5)\n    assert coach.last_feedback is not None\n```",
+        "testStrategy": "Run `pytest tests/test_live_coach.py -v`. All Coach tests use mocked dependencies. No real TTS or OpenAI calls.",
+        "priority": "medium",
+        "dependencies": [
+          1,
+          3,
+          5
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 8,
+        "title": "Add integration smoke test for headless video mode",
+        "description": "Create an integration test that runs the full pipeline on a short synthetic video or test video clip with --headless --no-voice --offline flags.",
+        "details": "Create tests/test_integration.py:\n\n1. test_headless_smoke - if test_dir/satvik_erg.mp4 exists, run the first 5 seconds with all safety flags\n2. test_run_returns_summary - verify run() returns dict with 'strokes' and 'cues' keys\n3. test_invalid_source_raises - non-existent path raises SystemExit with clear message\n4. test_window_param - window=1 triggers coaching earlier than window=3\n\nSkip tests if test video is not available:\n```python\nimport pytest\nimport os\nfrom pathlib import Path\n\nTEST_VIDEO = Path(\"test_dir/satvik_erg.mp4\")\n\n@pytest.mark.skipif(not TEST_VIDEO.exists(), reason=\"Test video not available\")\ndef test_headless_smoke():\n    from Bluetooth_test import run\n    # Run with all safety flags; expect no exceptions\n    summary = run(\n        source=str(TEST_VIDEO),\n        window=3,\n        headless=True,\n        voice=False,\n        use_llm=False,\n    )\n    assert \"strokes\" in summary\n    assert \"cues\" in summary\n    assert summary[\"strokes\"] >= 0\n\ndef test_invalid_source_raises():\n    from Bluetooth_test import run\n    with pytest.raises(SystemExit):\n        run(source=\"nonexistent_video.mp4\", headless=True, voice=False, use_llm=False)\n```",
+        "testStrategy": "Run `pytest tests/test_integration.py -v`. Skip gracefully if test video absent. Verify clean exit on invalid input.",
+        "priority": "medium",
+        "dependencies": [
+          1,
+          3,
+          7
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 9,
+        "title": "Harden main.py angle math with acos clamping",
+        "description": "The find_angle function in main.py does not clamp acos inputs like toolbox.py does, which can cause ValueError on float rounding. Add clamping to prevent crashes during live video processing.",
+        "details": "In main.py, update find_angle to match toolbox.py's implementation:\n\nCurrent (main.py:43-46):\n```python\ndef find_angle(a,b,c):\n    # finds angle using law of cosines\n    right_side = (a**2 - b**2 + c**2)/(2*a*c)\n    return math.acos(right_side)\n```\n\nUpdated:\n```python\ndef find_angle(a,b,c):\n    # finds angle using law of cosines (clamped so float error on straight legs can't raise)\n    right_side = (a**2 - b**2 + c**2)/(2*a*c)\n    return math.acos(max(-1.0, min(1.0, right_side)))\n```\n\nAlso update the body angle calculation in the main loop (around line 337):\n```python\n# Current:\nbody_angle = round((180-round(math.acos(e / d) * (180 / math.pi), 3)),1)*body_direction\n\n# Updated:\nbody_angle = round((180-round(math.acos(max(-1.0, min(1.0, e / d))) * (180 / math.pi), 3)),1)*body_direction\n```\n\nThis matches the pattern used in toolbox.py:45 and web_app/analysis.py:49.",
+        "testStrategy": "Add test_main_find_angle_clamped to tests/test_angle_math.py that imports main.find_angle and verifies it handles edge cases without raising.",
+        "priority": "high",
+        "dependencies": [
+          2
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 10,
+        "title": "Add comprehensive docstrings and type hints",
+        "description": "Add type hints and docstrings to all public functions in toolbox.py and Bluetooth_test.py to improve maintainability and enable static type checking.",
+        "details": "Add type hints following PEP 484/585 style:\n\ntoolbox.py updates:\n```python\nfrom typing import Optional\nfrom dataclasses import dataclass\n\ndef find_angle(a: float, b: float, c: float) -> float:\n    \"\"\"Return the angle (radians) at the vertex opposite side b using law of cosines.\n    \n    Args:\n        a: Length of side adjacent to the angle.\n        b: Length of side opposite the angle.\n        c: Length of other side adjacent to the angle.\n    \n    Returns:\n        Angle in radians, clamped to [0, pi] for numerical safety.\n    \"\"\"\n\ndef calc_angles(\n    hip: tuple[float, float],\n    knee: tuple[float, float],\n    ankle: tuple[float, float],\n    shoulder: tuple[float, float],\n) -> tuple[float, float]:\n    \"\"\"Compute knee and body angles from landmark positions.\n    \n    Returns:\n        (knee_angle, body_angle) in degrees.\n    \"\"\"\n\nclass StrokeDetector:\n    \"\"\"Finish/catch state machine that segments a stream of poses into strokes.\n    \n    Expects right-facing (or mirrored left-side) points keyed by right-side IDs.\n    \"\"\"\n    def update(\n        self,\n        points: dict[int, tuple[float, float]],\n        timestamp: float,\n        frame_width: float,\n    ) -> Optional[Stroke]:\n        \"\"\"Feed one frame; returns Stroke when a valid one completes, else None.\"\"\"\n```\n\nBluetooth_test.py updates:\n```python\ndef extract_points(\n    landmarks: Any,  # MediaPipe landmark list\n    side: int,\n    width: int,\n    height: int,\n    smooth: dict[int, tuple[int, int]],\n    alpha: float = EMA_ALPHA,\n) -> tuple[dict[int, tuple[int, int]], dict[int, tuple[int, int]]]:\n    \"\"\"Extract EMA-smoothed display and canonical (right-facing) landmark points.\"\"\"\n```",
+        "testStrategy": "Run `mypy toolbox.py Bluetooth_test.py --ignore-missing-imports` with no errors. Verify docstrings render correctly with `pydoc toolbox`.",
+        "priority": "low",
+        "dependencies": [
+          5,
+          7
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 11,
+        "title": "Create end-to-end test with mocked video capture",
+        "description": "Create a test that mocks cv2.VideoCapture to feed synthetic frames, verifying the full pipeline from frame input to coaching output without external video files.",
+        "details": "Create tests/test_e2e_mocked.py that patches cv2.VideoCapture:\n\n```python\nimport pytest\nimport numpy as np\nfrom unittest.mock import patch, MagicMock\nimport math\n\n@pytest.fixture\ndef mock_video_capture():\n    \"\"\"Generates 90 frames (3 seconds at 30fps) with synthetic pose.\"\"\"\n    class MockCapture:\n        def __init__(self, *args):\n            self.frame_idx = 0\n            self.max_frames = 90\n            \n        def isOpened(self):\n            return True\n            \n        def get(self, prop):\n            if prop == 5:  # CAP_PROP_FPS\n                return 30.0\n            return 0\n            \n        def read(self):\n            if self.frame_idx >= self.max_frames:\n                return False, None\n            # Return 640x480 black frame\n            frame = np.zeros((480, 640, 3), dtype=np.uint8)\n            self.frame_idx += 1\n            return True, frame\n            \n        def release(self):\n            pass\n    \n    return MockCapture\n\n@patch('Bluetooth_test.cv2.VideoCapture')\n@patch('Bluetooth_test.pose_compat.Pose')\ndef test_e2e_with_mocked_video(mock_pose, mock_cap, mock_video_capture):\n    mock_cap.return_value = mock_video_capture()\n    \n    # Mock pose results with sinusoidal shoulder movement\n    class MockLandmark:\n        def __init__(self, x, y, v):\n            self.x, self.y, self.visibility = x, y, v\n    \n    frame_count = [0]\n    def mock_process(rgb, timestamp_ms=None):\n        t = frame_count[0] / 30.0\n        shoulder_x = 0.5 + 0.3 * math.sin(2 * math.pi * t)  # 1 stroke/sec\n        frame_count[0] += 1\n        landmarks = [MockLandmark(0.5, 0.5, 0.9) for _ in range(33)]\n        landmarks[12] = MockLandmark(shoulder_x, 0.3, 0.95)\n        landmarks[24] = MockLandmark(0.4, 0.5, 0.95)\n        landmarks[26] = MockLandmark(0.35, 0.7, 0.95)\n        landmarks[28] = MockLandmark(0.5, 0.85, 0.95)\n        result = MagicMock()\n        result.pose_landmarks.landmark = landmarks\n        return result\n    \n    mock_pose.return_value.process = mock_process\n    mock_pose.return_value.close = lambda: None\n    \n    from Bluetooth_test import run\n    summary = run(source=0, window=2, headless=True, voice=False, use_llm=False)\n    \n    assert summary['strokes'] >= 1\n```",
+        "testStrategy": "Run `pytest tests/test_e2e_mocked.py -v`. Verify the pipeline runs end-to-end with mocked dependencies and produces expected stroke counts.",
+        "priority": "medium",
+        "dependencies": [
+          1,
+          7,
+          8
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 12,
+        "title": "Add CI workflow and coverage reporting",
+        "description": "Create a GitHub Actions workflow that runs tests on push/PR, reports coverage, and fails if coverage drops below the 70% threshold specified in the PRD.",
+        "details": "Create .github/workflows/test.yml:\n\n```yaml\nname: Tests\n\non:\n  push:\n    branches: [main, live-coach]\n  pull_request:\n    branches: [main]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      \n      - name: Set up Python\n        uses: actions/setup-python@v5\n        with:\n          python-version: '3.11'\n          \n      - name: Install dependencies\n        run: |\n          pip install -r requirements.txt\n          pip install pytest pytest-cov\n          \n      - name: Run tests with coverage\n        run: |\n          pytest tests/ -v --cov=toolbox --cov=Bluetooth_test --cov-report=xml --cov-fail-under=70\n          \n      - name: Upload coverage\n        uses: codecov/codecov-action@v4\n        with:\n          files: coverage.xml\n          fail_ci_if_error: false\n```\n\nUpdate .gitignore to include:\n```\n.coverage\ncoverage.xml\nhtmlcov/\n```\n\nNote: Some tests may need to be skipped in CI due to missing test video or display:\n```python\nimport pytest\nimport os\n\n@pytest.mark.skipif(\n    os.environ.get('CI') == 'true',\n    reason=\"Requires display or test video\"\n)\ndef test_requires_display():\n    ...\n```",
+        "testStrategy": "Push to a branch and verify the GitHub Actions workflow runs successfully. Check that coverage report is generated and the 70% threshold is enforced.",
+        "priority": "low",
+        "dependencies": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ],
+        "status": "pending",
+        "subtasks": []
+      }
+    ],
+    "metadata": {
+      "created": "2026-10-28T04:13:13.648Z",
+      "updated": "2026-10-28T04:13:13.648Z",
+      "description": "Tasks for master context"
+    }
+  }
+}
