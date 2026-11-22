@@ -220,11 +220,116 @@ def gpt_wrapper(knee_user, body_user, knee_ref, body_ref, max_knee_d, max_knee_l
 # ------------------Real-time coaching helpers------------------
 
 @dataclass
+class StrokeTiming:
+    """Where the catch and finish fall on a stroke's 0-100% curve (the 100-sample
+    curves from stroke_angle_curves), so curve indices can be read as rowing phases.
+
+    catch_pct is usually slightly negative: the detector only recognises a catch a few
+    frames after it happens, so each recorded stroke starts just after its catch and
+    ends just after the next one (next_catch_pct, a little under 100).
+    """
+    catch_pct: float
+    finish_pct: float
+    next_catch_pct: float
+    span_s: float | None = None  # seconds covered by the 0-100% curve; None when unknown
+
+    @property
+    def drive_share(self):
+        return (self.finish_pct - self.catch_pct) / (self.next_catch_pct - self.catch_pct)
+
+    def _seconds(self, pct):
+        return None if self.span_s is None else pct / 100 * self.span_s
+
+    @property
+    def drive_s(self):
+        return self._seconds(self.finish_pct - self.catch_pct)
+
+    @property
+    def recovery_s(self):
+        return self._seconds(self.next_catch_pct - self.finish_pct)
+
+    def locate(self, pct):
+        """(phase, fraction of that phase) for a curve %, e.g. ('drive', 0.5)."""
+        if pct < self.finish_pct:
+            phase, start, end = "drive", self.catch_pct, self.finish_pct
+        else:
+            phase, start, end = "recovery", self.finish_pct, self.next_catch_pct
+        frac = (pct - start) / (end - start) if end > start else 0.0
+        return phase, min(max(frac, 0.0), 1.0)
+
+    def describe(self, pct):
+        """Qualitative position of a curve %, e.g. 'halfway through the drive (0.41s after the catch)'."""
+        phase, frac = self.locate(pct)
+        for limit, words in ((0.15, "at the very start of"), (0.4, "early in"), (0.6, "halfway through"),
+                             (0.85, "late in"), (1.01, "at the very end of")):
+            if frac < limit:
+                break
+        text = f"{words} the {phase} ({frac:.0%} of the {phase}"
+        seconds = self._seconds(frac * ((self.finish_pct - self.catch_pct) if phase == "drive"
+                                        else (self.next_catch_pct - self.finish_pct)))
+        if seconds is not None:
+            text += f", {seconds:.2f}s after the {'catch' if phase == 'drive' else 'finish'}"
+        return text + ")"
+
+
+def average_stroke_timing(timings):
+    timings = [t for t in timings if t is not None]
+    if not timings:
+        return None
+    spans = [t.span_s for t in timings]
+    return StrokeTiming(
+        float(np.mean([t.catch_pct for t in timings])),
+        float(np.mean([t.finish_pct for t in timings])),
+        float(np.mean([t.next_catch_pct for t in timings])),
+        None if None in spans else float(np.mean(spans)),
+    )
+
+
+def _catch_finish_indices(xs):
+    # Right-facing rower: finish = shoulder furthest back (min x), catch = furthest forward
+    # (max x) after the finish
+    finish = int(np.argmin(xs))
+    return finish, finish + int(np.argmax(xs[finish:]))
+
+
+def timing_from_poses(poses, shoulder='12'):
+    """StrokeTiming from frame indices alone (no clock), e.g. for reference strokes.
+    Assumes the detector lag is the same at both catches, so catch_pct = next_catch_pct - 100."""
+    xs = [p[0] for p in poses[shoulder]]
+    if len(xs) < 2:
+        return None
+    finish, next_catch = _catch_finish_indices(xs)
+    pct = lambda i: i / (len(xs) - 1) * 100
+    return StrokeTiming(pct(next_catch) - 100, pct(finish), pct(next_catch))
+
+
+@dataclass
 class Stroke:
     poses: dict      # landmark id -> [(x, y), ...] for every frame of the stroke
     duration: float  # seconds
     rate: float      # strokes per minute
     travel: float    # shoulder travel as a fraction of frame width
+    # Phase markers on the detector's clock (seconds)
+    start_time: float = None       # first frame in poses
+    end_time: float = None         # last frame in poses
+    catch_time: float = None       # this stroke's catch (just before start_time)
+    finish_time: float = None
+    next_catch_time: float = None  # the catch that ends this stroke
+
+    @property
+    def drive_s(self):
+        return self.finish_time - self.catch_time
+
+    @property
+    def recovery_s(self):
+        return self.next_catch_time - self.finish_time
+
+    def timing(self):
+        span = self.end_time - self.start_time
+        if span <= 0:
+            return None
+        pct = lambda t: (t - self.start_time) / span * 100
+        return StrokeTiming(pct(self.catch_time), pct(self.finish_time), pct(self.next_catch_time), span)
 
 
 class StrokeDetector:
@@ -253,12 +358,15 @@ class StrokeDetector:
         self.catch = False
         self.waited = 0
         self.start_time = None
+        self.times = []                # timestamp of every frame in poses
+        self.prev_catch_time = None    # catch found at the end of the previous stroke
         self.warmed_up = False
 
     def update(self, points, timestamp, frame_width):
         """Feed one frame of points; returns a Stroke when a valid one completes."""
         if self.start_time is None:
             self.start_time = timestamp
+        self.times.append(timestamp)
         for id, pt in points.items():
             self.poses.setdefault(id, []).append(pt)
         history = self.poses[self.shoulder]
@@ -276,11 +384,16 @@ class StrokeDetector:
             return None
 
         # End of stroke
-        poses, duration, warmed_up = self.poses, timestamp - self.start_time, self.warmed_up
+        poses, times, duration = self.poses, self.times, timestamp - self.start_time
+        warmed_up, catch_time = self.warmed_up, self.prev_catch_time
+        xs = [p[0] for p in poses[self.shoulder]]
+        # The flags fire up to LOOKBACK frames late, so place the catch and finish at the
+        # shoulder extremes instead. The catch ending this stroke also starts the next one.
+        finish_idx, next_catch_idx = _catch_finish_indices(xs)
         self.reset()
         self.start_time = timestamp
         self.warmed_up = True
-        xs = [p[0] for p in poses[self.shoulder]]
+        self.prev_catch_time = times[next_catch_idx]
         travel = (max(xs) - min(xs)) / frame_width
         rate = 60 / duration if duration > 0 else 0
         if not warmed_up or travel < self.min_travel or len(xs) < self.min_frames:
@@ -289,7 +402,8 @@ class StrokeDetector:
             return None
         self.stroke_count += 1
         self.last_rate = rate
-        return Stroke(poses, duration, rate, travel)
+        return Stroke(poses, duration, rate, travel, times[0], times[-1],
+                      catch_time, times[finish_idx], times[next_catch_idx])
 
 
 def stroke_angle_curves(stroke_poses):
@@ -320,12 +434,28 @@ def average_angle_curves(strokes_poses):
     return [round(float(v), 1) for v in knee], [round(float(v), 1) for v in body]
 
 
+def _load_reference_batch(path, batch_index):
+    with open(path, 'r') as file:
+        batches = [b for b in json.load(file) if b]
+    return batches[batch_index]
+
+
+def load_reference_timing(path='ten_strokes.json', batch_index=0):
+    # Catch/finish positions of the reference strokes (no clock stored, so no seconds)
+    timings = []
+    for stroke in _load_reference_batch(path, batch_index):
+        try:
+            timings.append(timing_from_poses(stroke))
+        except (KeyError, ValueError):
+            continue
+    return average_stroke_timing(timings)
+
+
 def load_reference_curves(path='ten_strokes.json', batch_index=0, aspect=16/9):
     # Reference coords are normalized 0-1, so scale x by the source aspect ratio
     # before measuring angles (assumes 16:9 YouTube video)
-    with open(path, 'r') as file:
-        batches = [b for b in json.load(file) if b]
-    scaled = [{k: [(x * aspect, y) for x, y in pts] for k, pts in stroke.items()} for stroke in batches[batch_index]]
+    batch = _load_reference_batch(path, batch_index)
+    scaled = [{k: [(x * aspect, y) for x, y in pts] for k, pts in stroke.items()} for stroke in batch]
     curves = average_angle_curves(scaled)
     if curves is None:
         raise ValueError(f"No usable right-side strokes in reference batch {batch_index} of {path}")
@@ -343,13 +473,14 @@ def compare_angle_curves(knee_user, body_user, knee_ref, body_ref):
             max_body_diff, abs_body_dist.index(max_body_diff))
 
 
-def local_feedback(comparison):
+def local_feedback(comparison, timing=None):
     # Deterministic cue used when the LLM is unavailable
     _, body_user, _, body_ref, max_knee_d, max_knee_l, max_body_d, max_body_l = comparison
+    where = (lambda pct: timing.describe(pct).split(" (")[0]) if timing else (lambda pct: f"around {pct}% of the stroke")
     if max_body_d >= max_knee_d:
-        cue = f"Watch your body angle around {max_body_l}% of the stroke, it's {round(max_body_d)} degrees off the reference."
+        cue = f"Watch your body angle {where(max_body_l)}, it's {round(max_body_d)} degrees off the reference."
     else:
-        cue = f"Watch your knee angle around {max_knee_l}% of the stroke, it's {round(max_knee_d)} degrees off the reference."
+        cue = f"Watch your knee angle {where(max_knee_l)}, it's {round(max_knee_d)} degrees off the reference."
     user_finish = body_user.index(min(body_user)) + 1
     ref_finish = body_ref.index(min(body_ref)) + 1
     if abs(user_finish - ref_finish) >= 5:
@@ -364,8 +495,9 @@ def strip_asterisks(text):
     return re.sub(r"\*+", "", text)
 
 
-def coaching_feedback(comparison, use_llm=True):
+def coaching_feedback(comparison, use_llm=True, timing=None, ref_timing=None):
     # Returns (text, generated_by_llm); never raises so a live session can't crash on it
+    # timing / ref_timing: StrokeTiming catch/finish markers for the user and reference curves
     if use_llm and os.environ.get("OPENAI_API_KEY"):
         try:
             text = gpt_wrapper(*comparison)
@@ -373,7 +505,7 @@ def coaching_feedback(comparison, use_llm=True):
                 return strip_asterisks(text).strip(), True
         except Exception as exc:
             print(f"LLM feedback failed, using local fallback: {exc}")
-    return local_feedback(comparison), False
+    return local_feedback(comparison, timing), False
 
 if __name__ == '__main__':
 
