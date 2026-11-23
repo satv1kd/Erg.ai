@@ -137,8 +137,10 @@ def speak(text: str) -> bool:
 class Coach:
     """Runs analysis -> feedback -> speech on a background thread, one cue at a time."""
 
-    def __init__(self, reference, use_llm=True, voice=True):
+    def __init__(self, reference, use_llm=True, voice=True, ref_timing=None):
         self.reference = reference  # (knee curve, body curve)
+        self.ref_timing = ref_timing  # reference catch/finish markers (toolbox.StrokeTiming)
+        self.last_timing = None  # averaged catch/finish markers of the last analysed window
         self.use_llm = use_llm
         self.voice = voice
         self.status = "idle"
@@ -155,7 +157,9 @@ class Coach:
         if self.busy:
             return False
         poses = [s.poses for s in strokes]
-        self._thread = threading.Thread(target=self._run, args=(poses,), daemon=True)
+        # Catch/finish flags for each stroke, averaged so they line up with the averaged curves
+        timing = toolbox.average_stroke_timing([s.timing() for s in strokes])
+        self._thread = threading.Thread(target=self._run, args=(poses, timing), daemon=True)
         self._thread.start()
         return True
 
@@ -163,15 +167,18 @@ class Coach:
         if self._thread is not None:
             self._thread.join(timeout)
 
-    def _run(self, poses):
+    def _run(self, poses, timing):
         try:
             self.status = "analyzing"
             curves = toolbox.average_angle_curves(poses)
             if curves is None:
                 return
             comparison = toolbox.compare_angle_curves(*curves, *self.reference)
+            self.last_timing = timing
+            if timing and timing.drive_s is not None:
+                print(f"[coach] drive {timing.drive_s:.2f}s, recovery {timing.recovery_s:.2f}s")
             self.status = "thinking"
-            text, generated = toolbox.coaching_feedback(comparison, self.use_llm)
+            text, generated = toolbox.coaching_feedback(comparison, self.use_llm, timing, self.ref_timing)
             self.last_feedback = text
             self.cues_given += 1
             print(f"\n[coach{' (AI)' if generated else ''}] {text}\n")
@@ -259,7 +266,7 @@ def run(source=0, window=3, headless=False, voice=True, use_llm=True, reference_
     pose = pose_compat.Pose(min_detection_confidence=0.85, min_tracking_confidence=0.85)
     detector = toolbox.StrokeDetector()
     strokes = deque(maxlen=window)  # sliding window of the most recent valid strokes
-    coach = Coach(reference, use_llm=use_llm, voice=voice)
+    coach = Coach(reference, use_llm=use_llm, voice=voice, ref_timing=toolbox.load_reference_timing(reference_path))
     smooth = {}
     side = None
     last_seen = None
@@ -297,7 +304,8 @@ def run(source=0, window=3, headless=False, voice=True, use_llm=True, reference_
                     stroke = detector.update(canonical, timestamp, w)
                     if stroke:
                         strokes.append(stroke)
-                        print(f"Stroke {detector.stroke_count}: {stroke.rate:.1f} spm")
+                        print(f"Stroke {detector.stroke_count}: {stroke.rate:.1f} spm, "
+                              f"drive {stroke.drive_s:.2f}s, recovery {stroke.recovery_s:.2f}s")
                         if len(strokes) == window:
                             coach.submit(list(strokes))
             if side is not None and timestamp - last_seen > LOST_POSE_RESET_S:

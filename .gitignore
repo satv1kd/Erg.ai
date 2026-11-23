@@ -27,8 +27,9 @@ node_modules/
 *.sw?
 # OS specific
 
+models/
+google-cloud-sdk/
+
 # Task files
 # tasks.json
 # tasks/ 
-models/
-google-cloud-sdk/
